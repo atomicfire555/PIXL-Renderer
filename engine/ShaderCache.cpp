@@ -1517,10 +1517,11 @@ namespace SIE
 			auto lastSummary = lastArtifactSummary.load(std::memory_order_relaxed);
 			if (timing.requests >= lastSummary + 128 &&
 			    lastArtifactSummary.compare_exchange_strong(lastSummary, timing.requests, std::memory_order_relaxed)) {
-				logger::debug("[ShaderCompiler] requests={} coalesced={} preprocessCalls={} FXC={} failures={} memoryHits={} diskHits={} fastHits={} includeReads={} includeMemoHits={} preprocessTotal={:.2f}s FXCTotal={:.2f}s preprocessed={:.1f}MiB",
+				logger::debug("[ShaderCompiler] requests={} coalesced={} preprocessCalls={} FXC={} failures={} memoryHits={} diskHits={} fastHits={} includeReads={} includeMemoHits={} sharedInput={} reusedInput={} preprocessTotal={:.2f}s FXCTotal={:.2f}s preprocessed={:.1f}MiB",
 					timing.requests, timing.coalescedRequests, timing.preprocessingCalls,
 					timing.actualCompiles, timing.failures, timing.inMemoryHits, timing.diskHits,
 					timing.fastArtifactHits, timing.includeReads, timing.includeMemoHits,
+					timing.inputCoalesced, timing.inputReuseHits,
 					static_cast<double>(timing.preprocessingNanoseconds) / 1.0e9,
 					static_cast<double>(timing.compilerNanoseconds) / 1.0e9,
 					static_cast<double>(timing.preprocessedBytes) / (1024.0 * 1024.0));
@@ -2835,6 +2836,10 @@ namespace SIE
 		dependencyTracker = std::make_unique<ShaderFileDependencyTracker>();
 		logger::debug("ShaderCache initialized: {} startup threads, {} background threads, {} pool threads",
 			(int)compilationThreadCount, (int)backgroundCompilationThreadCount, (int)compilationPool.get_thread_count());
+		// Permutations with identical preprocessed text share one FXC run. A caller
+		// that blocks on such a run frees its active-work slot; wake the dispatcher
+		// so another queued permutation can start on a spare pool thread.
+		compilationArtifacts.SetInputWaitObserver([this] { compilationSet.NotifyCapacityChanged(); });
 		// Management thread runs on a dedicated jthread, not in the compilation pool,
 		// so it doesn't consume a pool slot that could be used for shader compilation.
 		managementJthread = std::jthread([this](std::stop_token stoken) {
@@ -2853,11 +2858,17 @@ namespace SIE
 		}
 		const auto hardwareLimit = std::max(1u, std::thread::hardware_concurrency());
 		const auto requested = std::max(compilationThreadCount, backgroundCompilationThreadCount);
-		const auto workerCount = static_cast<std::size_t>(std::clamp(requested, 1, static_cast<int32_t>(hardwareLimit)));
+		const auto activeLimit = static_cast<std::size_t>(std::clamp(requested, 1, static_cast<int32_t>(hardwareLimit)));
+		// The dispatcher limits *active* compiles to the configured thread counts.
+		// Tasks blocked on an identical in-flight FXC run are excluded from that
+		// limit, so the pool carries the same number again as idle headroom for
+		// them. Blocked threads use no CPU; active compilation never exceeds the
+		// configured foreground/background limits.
+		const auto workerCount = activeLimit * 2;
 		if (compilationPool.get_thread_count() != workerCount)
 			compilationPool.reset(workerCount);
-		logger::info("[ShaderCompiler] Configured {} workers (foreground limit {}, background limit {}, performance logical cores {})",
-			compilationPool.get_thread_count(), compilationThreadCount, backgroundCompilationThreadCount,
+		logger::info("[ShaderCompiler] Configured {} workers ({} active + duplicate-wait headroom; foreground limit {}, background limit {}, performance logical cores {})",
+			compilationPool.get_thread_count(), activeLimit, compilationThreadCount, backgroundCompilationThreadCount,
 			Util::GetPerformanceCoreCount());
 	}
 
@@ -3096,10 +3107,11 @@ namespace SIE
 		const auto now = std::chrono::steady_clock::now();
 		std::lock_guard lock(activeCompilationMutex);
 		const auto artifactTiming = compilationArtifacts.GetTimingSnapshot();
-		logger::info("[ShaderStartup] completed={} failed={} total={} diskHits={} fastHits={} includeReads={} includeMemoHits={} active={}",
+		logger::info("[ShaderStartup] completed={} failed={} total={} diskHits={} fastHits={} includeReads={} includeMemoHits={} FXC={} sharedInput={} reusedInput={} waiting={} active={}",
 			GetCompletedTasks(), GetFailedTasks(), GetTotalTasks(), GetDiskHitTasks(),
 			artifactTiming.fastArtifactHits, artifactTiming.includeReads, artifactTiming.includeMemoHits,
-			activeCompilations.size());
+			artifactTiming.actualCompiles, artifactTiming.inputCoalesced, artifactTiming.inputReuseHits,
+			compilationArtifacts.InputWaiters(), activeCompilations.size());
 		for (const auto& [thread, entry] : activeCompilations) {
 			const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - entry.second).count();
 			if (seconds >= 10)
@@ -3610,8 +3622,12 @@ namespace SIE
 				lock, stoken,
 				[this, &shaderCache]() { return !availableTasks.empty() &&
 			                                    // Dispatch when pool has room. Use < (not <=) so that after
-			                                    // push_task() the total never exceeds the limit.
-			                                    (int)shaderCache->compilationPool.get_tasks_total() <
+			                                    // push_task() the total never exceeds the limit. Tasks blocked
+			                                    // behind an identical in-flight FXC run use no CPU, so they do
+			                                    // not count against the active-work limit; the pool keeps
+			                                    // spare threads for them (ApplyStartupCompilerThreadSettings).
+			                                    (int)shaderCache->compilationPool.get_tasks_total() -
+			                                            shaderCache->GetCompilationArtifacts().InputWaiters() <
 			                                        (!shaderCache->backgroundCompilation ? shaderCache->compilationThreadCount : shaderCache->backgroundCompilationThreadCount); })) {
 			/*Woke up because of a stop request. */
 			return std::nullopt;

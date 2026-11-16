@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -283,8 +284,47 @@ class CompilationArtifacts
         std::mutex mutex;
         std::shared_ptr<RequestState> active;
     };
+    // Compiler-input identity. D3DCompile receives only the preprocessed text,
+    // source name, entry, profile, flags and the loaded compiler: macros and
+    // includes are already fully expanded into the text. Distinct permutation
+    // descriptors whose preprocessed text is identical therefore produce
+    // byte-identical bytecode (verified on the 1.1.0 shipped library, where 56%
+    // of stages are exact duplicates of another descriptor). This identity lets
+    // those permutations share one FXC run. It is process-local only; on-disk
+    // identity sidecars keep the original content-closure key.
+    struct InputState
+    {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::string key;
+        uint64_t generation{};
+        bool completed{};
+        HRESULT result{ E_FAIL };
+        Blob shader;
+        Blob diagnostics;
+    };
+    struct InputBucket
+    {
+        std::mutex mutex;
+        uint64_t generation = 0;
+        std::string key;
+        Blob blob;
+        // A failed compile is a property of the input too: retain its result
+        // and diagnostics so identical permutations fail without re-running FXC.
+        HRESULT failure = S_OK;
+        Blob failureDiagnostics;
+        std::shared_ptr<InputState> active;
+    };
     std::unique_ptr<Bucket[]> buckets{ std::make_unique<Bucket[]>(BucketCount) };
     std::unique_ptr<RequestBucket[]> requestBuckets{ std::make_unique<RequestBucket[]>(BucketCount) };
+    std::unique_ptr<InputBucket[]> inputBuckets{ std::make_unique<InputBucket[]>(BucketCount) };
+    std::atomic<uint64_t> inputReuseHits{};
+    std::atomic<uint64_t> inputCoalesced{};
+    // Number of callers currently blocked on another caller's identical FXC run.
+    // A scheduler may exclude them from its active-work limit because they use
+    // no CPU while blocked.
+    std::atomic<int> inputWaiters{};
+    std::function<void()> inputWaitObserver;
     std::atomic<uint64_t> generation{ 1 };
     std::atomic<uint64_t> compileCount{};
     std::atomic<uint64_t> requests{};
@@ -321,6 +361,8 @@ public:
         uint64_t fastArtifactHits{};
         uint64_t includeReads{};
         uint64_t includeMemoHits{};
+        uint64_t inputReuseHits{};
+        uint64_t inputCoalesced{};
     };
 
     std::shared_lock<std::shared_mutex> LockPublication() { return std::shared_lock(publication); }
@@ -334,8 +376,15 @@ public:
             inMemoryHits.load(std::memory_order_relaxed), diskHits.load(std::memory_order_relaxed),
             actualCompiles.load(std::memory_order_relaxed), failures.load(std::memory_order_relaxed),
             fastArtifactHits.load(std::memory_order_relaxed), includeReads.load(std::memory_order_relaxed),
-            includeMemoHits.load(std::memory_order_relaxed) };
+            includeMemoHits.load(std::memory_order_relaxed), inputReuseHits.load(std::memory_order_relaxed),
+            inputCoalesced.load(std::memory_order_relaxed) };
     }
+    // Callers blocked behind an identical in-flight FXC run (see InputState).
+    int InputWaiters() const { return inputWaiters.load(std::memory_order_acquire); }
+    // Invoked whenever a caller starts waiting on an identical in-flight compile,
+    // so a scheduler that excludes waiters from its limit can dispatch more work.
+    // Set once before compilation starts.
+    void SetInputWaitObserver(std::function<void()> observer) { inputWaitObserver = std::move(observer); }
     void Invalidate()
     {
         std::unique_lock lock(publication);
@@ -490,7 +539,10 @@ private:
             Blob preprocessed, diagnostics;
             const auto preprocessStart = std::chrono::steady_clock::now();
             preprocessingCalls.fetch_add(1, std::memory_order_relaxed);
-            HRESULT hr = sourceReadable ? D3DPreprocess(sourceBytes.data(), sourceBytes.size(), source.string().c_str(), macros, &recorder,
+            // The same narrow string is passed to D3DPreprocess and D3DCompile and
+            // is part of the compiler-input identity below.
+            const std::string sourceName = source.string();
+            HRESULT hr = sourceReadable ? D3DPreprocess(sourceBytes.data(), sourceBytes.size(), sourceName.c_str(), macros, &recorder,
                 preprocessed.GetAddressOf(), diagnostics.GetAddressOf()) : HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
             preprocessingNanoseconds.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - preprocessStart).count()), std::memory_order_relaxed);
@@ -512,35 +564,144 @@ private:
                 // and latch them under the same stripe lock so repeated missing
                 // root/include requests do not redo preprocessing every frame.
                 if (bucket.failures.contains(key)) return E_PENDING;
-                if (FAILED(hr)) {
+                if (FAILED(hr) || !preprocessed) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                     if (bucket.failures.size() >= 64) bucket.failures.clear();
                     bucket.failures.insert(key);
                     *errors = diagnostics.Detach();
-                    return hr;
-                }
-                if (bucket.key == key && bucket.blob) {
-                    inMemoryHits.fetch_add(1, std::memory_order_relaxed);
-                    return bucket.blob.CopyTo(output);
+                    return FAILED(hr) ? hr : E_FAIL;
                 }
             }
+
+            // Exact D3DCompile input identity: everything below is passed to
+            // D3DCompile verbatim (pDefines and pInclude are null, Flags2 is 0).
+            Hash inputHash;
+            inputHash.Field("PIXL.CompileInput.1");
+            inputHash.Field(sourceName);
+            inputHash.Field(entry); inputHash.Field(profile); inputHash.Add(&flags, sizeof(flags));
+            inputHash.Add(compiler.data(), compiler.size());
+            inputHash.Field(std::string_view(static_cast<const char*>(preprocessed->GetBufferPointer()), preprocessed->GetBufferSize()));
+            const auto inputDigest = inputHash.Finish();
+            const auto inputKey = Hex(inputDigest);
+            auto& inputBucket = inputBuckets[
+                (static_cast<size_t>(inputDigest[0]) | (static_cast<size_t>(inputDigest[1]) << 8) |
+                    (static_cast<size_t>(inputDigest[2]) << 16)) & (BucketCount - 1)];
+
             const auto path = stagePath.empty() ? std::filesystem::path(L"Data/PIXL/PipelineLibrary/Standalone/v1") / (key + ".pixlbin") : stagePath;
             Blob blob;
             bool hit = diskEnabled && ReadArtifact(path, digest, blob);
+            HRESULT compileResult = S_OK;
             if (!hit) {
                 diagnostics.Reset();
-                compileCount.fetch_add(1, std::memory_order_relaxed);
-                actualCompiles.fetch_add(1, std::memory_order_relaxed);
-                // Compile exactly the source snapshot that produced the digest.
-                // Reopening files here would allow edits during compilation to poison the cache.
-                const auto compilerStart = std::chrono::steady_clock::now();
-                hr = D3DCompile(preprocessed->GetBufferPointer(), preprocessed->GetBufferSize(), source.string().c_str(),
-                    nullptr, nullptr, entry, profile, flags, 0, blob.GetAddressOf(), diagnostics.GetAddressOf());
-                compilerNanoseconds.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - compilerStart).count()), std::memory_order_relaxed);
+                std::shared_ptr<InputState> follow, lead;
+                {
+                    std::lock_guard inputLock(inputBucket.mutex);
+                    if (inputBucket.generation != epoch) {
+                        inputBucket.key.clear(); inputBucket.blob.Reset(); inputBucket.active.reset();
+                        inputBucket.failure = S_OK; inputBucket.failureDiagnostics.Reset();
+                        inputBucket.generation = epoch;
+                    }
+                    if (inputBucket.key == inputKey && inputBucket.blob) {
+                        blob = inputBucket.blob;
+                    } else if (inputBucket.key == inputKey && FAILED(inputBucket.failure)) {
+                        compileResult = inputBucket.failure;
+                        diagnostics = inputBucket.failureDiagnostics;
+                    } else if (inputBucket.active && inputBucket.active->key == inputKey &&
+                               inputBucket.active->generation == epoch) {
+                        follow = inputBucket.active;
+                    } else {
+                        // A different input sharing this stripe may still be
+                        // in flight; its leader keeps its own state and only
+                        // clears the stripe if it is still the active entry.
+                        lead = std::make_shared<InputState>();
+                        lead->key = inputKey;
+                        lead->generation = epoch;
+                        inputBucket.active = lead;
+                    }
+                }
+                if (blob || FAILED(compileResult)) {
+                    inMemoryHits.fetch_add(1, std::memory_order_relaxed);
+                    inputReuseHits.fetch_add(1, std::memory_order_relaxed);
+                } else if (follow) {
+                    inputCoalesced.fetch_add(1, std::memory_order_relaxed);
+                    inputWaiters.fetch_add(1, std::memory_order_acq_rel);
+                    if (inputWaitObserver) inputWaitObserver();
+                    {
+                        std::unique_lock waitLock(follow->mutex);
+                        follow->ready.wait(waitLock, [&] { return follow->completed || epoch != Generation(); });
+                        compileResult = follow->completed ? follow->result : E_ABORT;
+                        if (follow->completed) {
+                            blob = follow->shader;
+                            diagnostics = follow->diagnostics;
+                        }
+                    }
+                    inputWaiters.fetch_sub(1, std::memory_order_acq_rel);
+                    if (epoch != Generation()) return E_ABORT;
+                } else {
+                    // Leader: always publish a terminal state, including when
+                    // FXC or the allocator throws, so followers never hang.
+                    struct Publish
+                    {
+                        InputState& state;
+                        InputBucket& stripe;
+                        const std::shared_ptr<InputState>& self;
+                        HRESULT outResult = E_FAIL;
+                        Blob outShader, outDiagnostics;
+                        Publish(InputState& s, InputBucket& b, const std::shared_ptr<InputState>& p) :
+                            state(s), stripe(b), self(p) {}
+                        Publish(const Publish&) = delete;
+                        Publish& operator=(const Publish&) = delete;
+                        ~Publish()
+                        {
+                            {
+                                std::lock_guard lock(state.mutex);
+                                state.result = outResult;
+                                state.shader = outShader;
+                                state.diagnostics = outDiagnostics;
+                                state.completed = true;
+                            }
+                            {
+                                std::lock_guard lock(stripe.mutex);
+                                if (stripe.active == self) {
+                                    if (stripe.generation == state.generation) {
+                                        stripe.key = state.key;
+                                        stripe.blob.Reset();
+                                        stripe.failure = S_OK;
+                                        stripe.failureDiagnostics.Reset();
+                                        if (SUCCEEDED(outResult) && outShader) {
+                                            // Same retention bound as the content buckets.
+                                            if (outShader->GetBufferSize() <= 1024 * 1024)
+                                                stripe.blob = outShader;
+                                            else
+                                                stripe.key.clear();
+                                        } else {
+                                            stripe.failure = FAILED(outResult) ? outResult : E_FAIL;
+                                            stripe.failureDiagnostics = outDiagnostics;
+                                        }
+                                    }
+                                    stripe.active.reset();
+                                }
+                            }
+                            state.ready.notify_all();
+                        }
+                    } publish(*lead, inputBucket, lead);
+                    compileCount.fetch_add(1, std::memory_order_relaxed);
+                    actualCompiles.fetch_add(1, std::memory_order_relaxed);
+                    // Compile exactly the source snapshot that produced the digest.
+                    // Reopening files here would allow edits during compilation to poison the cache.
+                    const auto compilerStart = std::chrono::steady_clock::now();
+                    compileResult = D3DCompile(preprocessed->GetBufferPointer(), preprocessed->GetBufferSize(), sourceName.c_str(),
+                        nullptr, nullptr, entry, profile, flags, 0, blob.GetAddressOf(), diagnostics.GetAddressOf());
+                    compilerNanoseconds.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - compilerStart).count()), std::memory_order_relaxed);
+                    publish.outResult = compileResult;
+                    publish.outShader = blob;
+                    publish.outDiagnostics = diagnostics;
+                }
             } else {
                 diskHits.fetch_add(1, std::memory_order_relaxed);
             }
+            hr = compileResult;
             std::shared_lock publishLock(publication);
             if (epoch != Generation()) return E_ABORT;
             if (FAILED(hr) || !blob) {
@@ -553,6 +714,9 @@ private:
                 *errors = diagnostics.Detach();
                 return FAILED(hr) ? hr : E_FAIL;
             }
+            // Every non-disk result, including input reuse, is persisted under
+            // this stage's own path and content-closure key so the next launch
+            // takes the per-descriptor fast path.
             if (!hit && diskEnabled) {
                 std::error_code ec;
                 std::filesystem::create_directories(path.parent_path(), ec);
@@ -566,14 +730,6 @@ private:
             }
             if (diskEnabled && !stagePath.empty() && blob)
                 WriteFastIndex(path, requestDigest, digest, recorder.opened);
-            // Keep expensive preprocess/compile/disk work outside the stripe lock;
-            // unrelated shaders can share this bucket during startup compilation.
-            std::unique_lock workLock(bucket.mutex);
-            if (epoch != Generation()) return E_ABORT;
-            if (bucket.generation != epoch) { bucket.key.clear(); bucket.blob.Reset(); bucket.failures.clear(); bucket.generation = epoch; }
-            // At most 32 MiB retained; oversized bytecode still has disk reuse.
-            bucket.key = key;
-            bucket.blob = blob->GetBufferSize() <= 1024 * 1024 ? blob : Blob{};
             if (diskHit) *diskHit = hit;
             *errors = diagnostics.Detach();
             *output = blob.Detach();

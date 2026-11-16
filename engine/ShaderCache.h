@@ -238,6 +238,14 @@ namespace SIE
 		void Complete(const ShaderCompilationTask& task);
 		/** @brief Resets all task queues and counters for a fresh compilation pass. */
 		void Clear();
+		/** @brief Wakes the dispatcher after its active-work limit may have changed. */
+		void NotifyCapacityChanged()
+		{
+			// Taking the mutex orders this notification after any in-progress
+			// predicate evaluation, so the wakeup cannot be lost.
+			{ std::lock_guard lock(compilationMutex); }
+			conditionVariable.notify_one();
+		}
 		/** @brief Formats a millisecond duration into a human-readable time string. */
 		static std::string GetHumanTime(double a_totalMs);
 		/** @brief Estimates remaining compilation time based on completed task throughput. */

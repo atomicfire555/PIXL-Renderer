@@ -67,6 +67,9 @@ if(BUILD_TESTING)
         pixl_add_portable_test(PIXLTestCompilationArtifacts
             "${CMAKE_SOURCE_DIR}/tools/TestCompilationArtifacts.cpp")
         target_link_libraries(PIXLTestCompilationArtifacts PRIVATE d3dcompiler bcrypt)
+        pixl_add_portable_test(PIXLTestCompilationArtifactDedupe
+            "${CMAKE_SOURCE_DIR}/tools/TestCompilationArtifactDedupe.cpp")
+        target_link_libraries(PIXLTestCompilationArtifactDedupe PRIVATE d3dcompiler bcrypt)
         pixl_add_portable_test(PIXLTestHybridGIIntelligenceGPU "${CMAKE_SOURCE_DIR}/tools/TestHybridGIIntelligenceGPU.cpp")
         pixl_add_portable_test(PIXLTestHybridGIActiveGPU "${CMAKE_SOURCE_DIR}/tools/TestHybridGIActiveGPU.cpp")
         pixl_add_portable_test(PIXLTestHybridGISnapshotGPU "${CMAKE_SOURCE_DIR}/tools/TestHybridGISnapshotGPU.cpp")
@@ -85,6 +88,7 @@ if(BUILD_TESTING)
         set(PIXL_WINDOWS_MODERNISATION_TESTS
             PIXLTestCompilationArtifactFast
             PIXLTestCompilationArtifacts
+            PIXLTestCompilationArtifactDedupe
             PIXLTestModernShaderMath
             PIXLTestDofTiles
             PIXLTestOceanDynamicsFFT
