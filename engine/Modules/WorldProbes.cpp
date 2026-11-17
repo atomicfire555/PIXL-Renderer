@@ -124,6 +124,7 @@ void WorldProbes::DrawSettings()
 
 void WorldProbes::LoadSettings(json& o_json)
 {
+	const uint previousSSR = settings.EnabledSSR;
 	settings = o_json.is_object() ? o_json.get<Settings>() : Settings{};
 	settings.EnabledSSR = !!settings.EnabledSSR;
 	settings.EnabledCreator = !!settings.EnabledCreator;
@@ -132,7 +133,14 @@ void WorldProbes::LoadSettings(json& o_json)
 	float* channels = &color.x;
 	for (int i = 0; i < 4; ++i)
 		channels[i] = std::isfinite(channels[i]) ? std::clamp(channels[i], 0.0f, 1.0f) : defaults[i];
-	recompileFlag = true;
+	// Only ENABLESSR reaches the shader defines. The boot load happens before the
+	// startup compile, which already uses these values, so recompiling then only
+	// deleted the cached reflection shader and invalidated every in-flight compile
+	// (ShaderCache::Clear bumps the global compile generation). Later loads
+	// (presets, restore) recompile only when the define actually changes.
+	if (settingsLoadedOnce && settings.EnabledSSR != previousSSR)
+		recompileFlag = true;
+	settingsLoadedOnce = true;
 }
 
 void WorldProbes::SaveSettings(json& o_json)
@@ -142,8 +150,10 @@ void WorldProbes::SaveSettings(json& o_json)
 
 void WorldProbes::RestoreDefaultSettings()
 {
+	const uint previousSSR = settings.EnabledSSR;
 	settings = {};
-	recompileFlag = true;
+	if (settings.EnabledSSR != previousSSR)
+		recompileFlag = true;
 }
 
 void WorldProbes::DataLoaded()

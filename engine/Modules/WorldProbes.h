@@ -94,6 +94,7 @@ public:
 	// pipeline state changes to UpdateCubemap, where D3D resources are owned.
 	std::atomic_bool cellTransitionCapturePending{ false };
 	bool recompileFlag = false;
+	bool settingsLoadedOnce = false;
 	float previousHoursPassed = 0.0f;
 
 	enum class NextTask
