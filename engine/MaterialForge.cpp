@@ -346,6 +346,11 @@ namespace
 	static_assert(sizeof(MaterialForgeTessellationConstants) == 32);
 
 	thread_local MaterialForgeTessellationParameters gPendingMaterialForgeTessellation;
+	// True once ArmForNextDraw has written gPendingMaterialForgeTessellation and
+	// until the next draw consumes it. While false the pending block is known to be
+	// default-constructed, so the per-draw exchange (36 COM pointers constructed,
+	// moved and destroyed on every D3D draw call) can be skipped with no change.
+	thread_local bool gPendingMaterialForgeTessellationArmed = false;
 	winrt::com_ptr<ID3D11Device> gMaterialForgeTessellationDevice;
 	winrt::com_ptr<ID3D11HullShader> gMaterialForgeHullShader;
 	winrt::com_ptr<ID3D11DomainShader> gMaterialForgeDomainShader;
@@ -520,6 +525,7 @@ namespace MaterialForgeTessellation
 		float fadeEnd) noexcept
 	{
 		gPendingMaterialForgeTessellation = MaterialForgeTessellationParameters{};
+		gPendingMaterialForgeTessellationArmed = true;
 		if (!std::isfinite(displacementScale) || !std::isfinite(maximumTessellationFactor) || displacementScale <= 0.f)
 			return;
 
@@ -752,6 +758,9 @@ namespace MaterialForgeTessellation
 
 	DrawState::DrawState(ID3D11DeviceContext* context, bool allowTessellation)
 	{
+		if (!gPendingMaterialForgeTessellationArmed)
+			return;
+		gPendingMaterialForgeTessellationArmed = false;
 		const auto parameters = std::exchange(gPendingMaterialForgeTessellation, MaterialForgeTessellationParameters{});
 		if (allowTessellation && parameters.enabled) {
 			impl = std::make_unique<Impl>(context, parameters);
