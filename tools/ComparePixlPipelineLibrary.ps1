@@ -4,7 +4,7 @@
   stage they both hold. Identical bytecode means identical rendering.
 
 .EXAMPLE
-  .\ComparePixlPipelineLibrary.ps1 -Reference D:\PIXL-cache-official -Candidate "<MO2 Overwrite>\PIXL\PipelineLibrary"
+  .\ComparePixlPipelineLibrary.ps1 -Reference "<copy of the official cache>" -Candidate "<MO2 Overwrite>\PIXL\PipelineLibrary"
 #>
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string]$Reference,

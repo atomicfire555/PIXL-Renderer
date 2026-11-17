@@ -49,7 +49,8 @@ jobs:
           New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
 
       - name: Restore vcpkg package cache
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\vcpkg-binary-cache
           key: vcpkg-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
@@ -58,17 +59,27 @@ jobs:
       - name: Configure
         run: cmake -S . --preset=ALL
 
+      # Save built dependencies even if a later step fails, so retries skip them.
+      - name: Save vcpkg package cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-binary-cache
+          key: vcpkg-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
+
       - name: Build DLL and Core package
         run: cmake --build --preset=Package
 
+      # Upload the DLL even if the audit/packaging that runs after linking fails.
       - name: Upload PIXLRenderer.dll
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PIXLRenderer-dll-${{ github.sha }}
           path: |
             build/ALL/**/PIXLRenderer.dll
             build/ALL/**/PIXLRenderer.pdb
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload Core package
         uses: actions/upload-artifact@v4
