@@ -2098,10 +2098,10 @@ namespace SIE
 				*type == RE::BSShader::Type::ImageSpace)
 				continue;
 			uint32_t descriptor = 0;
-			const auto* first = descriptorText.data();
-			const auto* last = first + descriptorText.size();
-			const auto [end, ec] = std::from_chars(first, last, descriptor, 16);
-			if (ec != std::errc{} || end != last) continue;
+			const char* textBegin = descriptorText.data();
+			const char* textEnd = textBegin + descriptorText.size();
+			const auto parsed = std::from_chars(textBegin, textEnd, descriptor, 16);
+			if (parsed.ec != std::errc{} || parsed.ptr != textEnd) continue;
 			if (out.insert(RuntimeVariantKey(*type, *shaderClass, descriptor)).second) ++loaded;
 		}
 		logger::info("[ShaderCache] Loaded {} runtime shader variant(s) for startup compilation", loaded);
