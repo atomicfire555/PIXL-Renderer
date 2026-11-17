@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <limits>
 #include <unordered_map>
 #include <utility>
@@ -1841,6 +1842,71 @@ struct BSLightingShaderProperty_LoadBinary
 	static inline REL::Relocation<decltype(thunk)> func;
 };
 
+namespace
+{
+	// Same result as lowercasing the whole name with std::tolower and comparing it
+	// to "objectlodroot", without allocating a string per scene-graph node.
+	bool IsObjectLODRootName(const char* a_name)
+	{
+		constexpr std::string_view target = "objectlodroot";
+		for (size_t i = 0; i < target.size(); ++i) {
+			if (a_name[i] == '\0' || static_cast<char>(std::tolower(static_cast<unsigned char>(a_name[i]))) != target[i])
+				return false;
+		}
+		return a_name[target.size()] == '\0';
+	}
+
+	struct AutomaticSurfaceClassification
+	{
+		float furFromHierarchy = 0.0f;
+		float furFromMaterialPath = 0.0f;
+		float hair = 0.0f;
+		bool furExcluded = false;
+	};
+
+	// GetRenderPasses runs for every accumulated Lighting geometry, every frame and
+	// again for each shadow/reflection accumulation. The fur/hair classifiers only
+	// read the diffuse texture name, the draw hierarchy names, the geometry name and
+	// the PBR material path, so memoize them on exactly those strings.
+	AutomaticSurfaceClassification GetAutomaticSurfaceClassification(
+		const RE::BSLightingShaderMaterialBase& a_material, std::string_view a_hierarchy, std::string_view a_geometryName,
+		std::string_view a_materialPath, bool a_classifyMaterialPath)
+	{
+		static std::shared_mutex classificationMutex;
+		static std::unordered_map<std::string, AutomaticSurfaceClassification> classificationCache;
+		thread_local std::string classificationKey;
+
+		const char* diffuseName = a_material.diffuseTexture ? a_material.diffuseTexture->name.c_str() : nullptr;
+		classificationKey.clear();
+		classificationKey.append(diffuseName ? diffuseName : "");
+		classificationKey.push_back('\x1F');
+		classificationKey.append(a_hierarchy);
+		classificationKey.push_back('\x1F');
+		classificationKey.append(a_geometryName);
+		classificationKey.push_back('\x1F');
+		classificationKey.push_back(a_classifyMaterialPath ? '1' : '0');
+		classificationKey.append(a_materialPath);
+		{
+			std::shared_lock lock(classificationMutex);
+			if (auto found = classificationCache.find(classificationKey); found != classificationCache.end())
+				return found->second;
+		}
+
+		AutomaticSurfaceClassification classified;
+		classified.furFromHierarchy = PhysicalMaterial::ClassifyAutomaticFur(a_material, a_hierarchy);
+		classified.furFromMaterialPath = a_classifyMaterialPath ? PhysicalMaterial::ClassifyAutomaticFur(a_material, a_materialPath) : 0.0f;
+		classified.hair = PhysicalMaterial::ClassifyAutomaticHair(a_material, a_hierarchy);
+		classified.furExcluded = PhysicalMaterial::IsFurExcluded(a_material, a_geometryName);
+		{
+			std::unique_lock lock(classificationMutex);
+			if (classificationCache.size() >= 65536)
+				classificationCache.clear();
+			classificationCache.emplace(classificationKey, classified);
+		}
+		return classified;
+	}
+}
+
 struct BSLightingShaderProperty_GetRenderPasses
 {
 	static RE::BSShaderProperty::RenderPassArray* thunk(RE::BSLightingShaderProperty* property, RE::BSGeometry* geometry, std::uint32_t renderFlags, RE::BSShaderAccumulator* accumulator)
@@ -1858,53 +1924,51 @@ struct BSLightingShaderProperty_GetRenderPasses
 			isPbr = true;
 		}
 		std::string geometryHierarchy;
+		geometryHierarchy.reserve(256);
 		bool isObjectLODSubtree = false;
 		for (auto* object = static_cast<RE::NiAVObject*>(geometry); object != nullptr && geometryHierarchy.size() < 512u; object = object->parent) {
 			const char* objectName = object->name.c_str();
 			if (objectName != nullptr && *objectName != '\0') {
-				std::string normalizedName(objectName);
-				std::ranges::transform(normalizedName, normalizedName.begin(), [](unsigned char character) {
-					return static_cast<char>(std::tolower(character));
-				});
-				isObjectLODSubtree |= normalizedName == "objectlodroot";
+				isObjectLODSubtree |= IsObjectLODRootName(objectName);
 				if (!geometryHierarchy.empty())
 					geometryHierarchy.push_back('\\');
 				geometryHierarchy.append(objectName);
 			}
 		}
 		float automaticFurConfidence = 0.0f;
+		float automaticHairConfidence = 0.0f;
 		if (property->material != nullptr) {
-			automaticFurConfidence = PhysicalMaterial::ClassifyAutomaticFur(
-				*static_cast<RE::BSLightingShaderMaterialBase*>(property->material),
-				geometryHierarchy);
-			if (isPbr && !property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape)) {
-				auto* pbrMaterial = static_cast<BSLightingShaderMaterialPBR*>(property->material);
+			auto* baseMaterial = static_cast<RE::BSLightingShaderMaterialBase*>(property->material);
+			const bool pbrSurface = isPbr && !property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape);
+			auto* pbrMaterial = pbrSurface ? static_cast<BSLightingShaderMaterialPBR*>(property->material) : nullptr;
+			const bool explicitFurShell = pbrMaterial && pbrMaterial->pbrFlags.any(PBRFlags::FurShell);
+			const bool classifyPbrPath = pbrMaterial && !explicitFurShell && !pbrMaterial->inputFilePath.empty();
+			const std::string_view geometryName =
+				geometry && geometry->name.c_str() ? std::string_view(geometry->name.c_str()) : std::string_view{};
+			// The fur/hair classifiers are pure functions of these names; reuse
+			// their results instead of re-running them for every accumulation.
+			const auto classification = GetAutomaticSurfaceClassification(*baseMaterial, geometryHierarchy, geometryName,
+				classifyPbrPath ? std::string_view(pbrMaterial->inputFilePath) : std::string_view{}, classifyPbrPath);
+			automaticFurConfidence = classification.furFromHierarchy;
+			if (pbrMaterial) {
 				// Explicit Material Forge authoring is authoritative. Path classification
 				// also covers PBR materials whose texture set replaces vanilla Khajiit assets.
-				if (pbrMaterial->pbrFlags.any(PBRFlags::FurShell))
+				if (explicitFurShell)
 					automaticFurConfidence = 1.0f;
-				else if (!pbrMaterial->inputFilePath.empty())
-					automaticFurConfidence = std::max(
-						automaticFurConfidence,
-						PhysicalMaterial::ClassifyAutomaticFur(*pbrMaterial, pbrMaterial->inputFilePath));
+				else if (classifyPbrPath)
+					automaticFurConfidence = std::max(automaticFurConfidence, classification.furFromMaterialPath);
 			}
+			// LOD roots are scene proxies rather than the authored fur surface. They
+			// can carry names/textures such as "Fur\\HagravenHouse01" and use the
+			// ordinary lighting technique, so the technique check alone cannot keep
+			// shell extrusion off these large proxy meshes.
+			if (isObjectLODSubtree)
+				automaticFurConfidence = 0.0f;
+			automaticHairConfidence = classification.hair;
+			// Anatomical exclusions must survive explicit fur and actor-path fallbacks.
+			if (classification.furExcluded)
+				automaticFurConfidence = 0.0f;
 		}
-		// LOD roots are scene proxies rather than the authored fur surface. They
-		// can carry names/textures such as "Fur\\HagravenHouse01" and use the
-		// ordinary lighting technique, so the technique check alone cannot keep
-		// shell extrusion off these large proxy meshes.
-		if (isObjectLODSubtree)
-			automaticFurConfidence = 0.0f;
-		float automaticHairConfidence = property->material != nullptr
-			? PhysicalMaterial::ClassifyAutomaticHair(
-				  *static_cast<RE::BSLightingShaderMaterialBase*>(property->material),
-				  geometryHierarchy)
-			: 0.0f;
-		// Anatomical exclusions must survive explicit fur and actor-path fallbacks.
-		if (property->material && PhysicalMaterial::IsFurExcluded(
-			*static_cast<RE::BSLightingShaderMaterialBase*>(property->material),
-			geometry && geometry->name.c_str() ? std::string_view(geometry->name.c_str()) : std::string_view{}))
-			automaticFurConfidence = 0.0f;
 		const bool hairHasAlpha = geometry != nullptr &&
 			geometry->GetGeometryRuntimeData().alphaProperty != nullptr;
 		if (automaticHairConfidence > 0.0f && hairHasAlpha)
