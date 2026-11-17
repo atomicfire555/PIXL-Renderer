@@ -1,0 +1,65 @@
+name: Build PIXL Renderer (test DLL)
+
+# Builds PIXLRenderer.dll and the Core package on every push, and on demand
+# from the Actions tab ("Run workflow"). Download the result from the run's
+# "Artifacts" section.
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install current CMake
+        run: py -m pip install --disable-pip-version-check --upgrade cmake
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+
+      - name: Restore vcpkg package cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-binary-cache
+          key: vcpkg-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
+          restore-keys: vcpkg-
+
+      - name: Configure
+        run: cmake -S . --preset=ALL
+
+      - name: Build DLL and Core package
+        run: cmake --build --preset=Package
+
+      - name: Upload PIXLRenderer.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIXLRenderer-dll-${{ github.sha }}
+          path: |
+            build/ALL/**/PIXLRenderer.dll
+            build/ALL/**/PIXLRenderer.pdb
+          if-no-files-found: error
+
+      - name: Upload Core package
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIXL-Core-package-${{ github.sha }}
+          path: dist/*.zip
+          if-no-files-found: warn
