@@ -248,6 +248,9 @@ private:
 	};
 	std::mutex pendingOceanDrawMutex;
 	std::deque<PendingOceanDraw> pendingOceanDraws;
+	// Mirrors pendingOceanDraws.size() (written under pendingOceanDrawMutex) so the
+	// per-draw D3D hook can skip its IA query and lock when nothing is queued.
+	std::atomic<size_t> pendingOceanDrawCount{ 0 };
 	struct SprayParticleGPU
 	{
 		float position[3]{};

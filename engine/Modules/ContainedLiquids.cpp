@@ -53,13 +53,29 @@ namespace {
         return hash;
     }
 
+    constexpr unsigned char AsciiLower(unsigned char value)
+    {
+        return (value >= 'A' && value <= 'Z') ? static_cast<unsigned char>(value + ('a' - 'A')) : value;
+    }
+
+    // Runs for every Lighting draw (twice), so avoid the CRT's locale-aware
+    // std::tolower call per character. Same result as the previous
+    // std::search + std::tolower version under the C locale.
     bool ContainsNoCase(const char* text, std::string_view needle)
     {
         if (!text || needle.empty()) return false;
-        const std::string_view value{text};
-        return std::search(value.begin(), value.end(), needle.begin(), needle.end(),
-            [](char lhs, char rhs) { return std::tolower(static_cast<unsigned char>(lhs)) ==
-                std::tolower(static_cast<unsigned char>(rhs)); }) != value.end();
+        const auto* hay = reinterpret_cast<const unsigned char*>(text);
+        const auto* pattern = reinterpret_cast<const unsigned char*>(needle.data());
+        const size_t patternSize = needle.size();
+        const unsigned char first = AsciiLower(pattern[0]);
+        for (; *hay; ++hay) {
+            if (AsciiLower(*hay) != first) continue;
+            size_t matched = 1;
+            while (matched < patternSize && hay[matched] && AsciiLower(hay[matched]) == AsciiLower(pattern[matched]))
+                ++matched;
+            if (matched == patternSize) return true;
+        }
+        return false;
     }
 
     bool HasAny(const char* value, std::initializer_list<std::string_view> needles)

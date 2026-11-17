@@ -21,6 +21,7 @@
 #include <bitset>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <format>
 #include <string>
 #include <thread>
@@ -61,7 +62,31 @@ namespace PerfProbe
 		{
 			std::string name;
 			uintptr_t base = 0;
+			// Sorted (rva, name) of exported functions, used to name leaf
+			// samples inside system / third-party DLLs without symbols.
+			std::vector<std::pair<uint32_t, const char*>> exports;
 		};
+
+		void LoadExports(ModuleEntry& a_module, const IMAGE_NT_HEADERS* a_nt)
+		{
+			const auto& directory = a_nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+			if (!directory.VirtualAddress || !directory.Size)
+				return;
+			const auto base = a_module.base;
+			const auto* exportDir = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + directory.VirtualAddress);
+			const auto* functions = reinterpret_cast<const DWORD*>(base + exportDir->AddressOfFunctions);
+			const auto* names = reinterpret_cast<const DWORD*>(base + exportDir->AddressOfNames);
+			const auto* ordinals = reinterpret_cast<const WORD*>(base + exportDir->AddressOfNameOrdinals);
+			for (DWORD i = 0; i < exportDir->NumberOfNames; ++i) {
+				if (ordinals[i] >= exportDir->NumberOfFunctions)
+					continue;
+				const DWORD rva = functions[ordinals[i]];
+				if (rva >= directory.VirtualAddress && rva < directory.VirtualAddress + directory.Size)
+					continue;  // forwarder string, not code
+				a_module.exports.emplace_back(rva, reinterpret_cast<const char*>(base + names[i]));
+			}
+			std::ranges::sort(a_module.exports, [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+		}
 
 		class RenderThreadSampler
 		{
@@ -136,6 +161,8 @@ namespace PerfProbe
 					const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + static_cast<uintptr_t>(dos->e_lfanew));
 					if (nt->Signature != IMAGE_NT_SIGNATURE)
 						continue;
+					if (moduleIndex != gameIndex && moduleIndex != pixlIndex)
+						LoadExports(modules.back(), nt);
 					const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
 					for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
 						if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE))
@@ -204,8 +231,28 @@ namespace PerfProbe
 				for (size_t i = 0; i < modules.size(); ++i)
 					if (seen.test(i))
 						inclusive[i]++;
-				if (nearestPixl && pixlIndex >= 0)
-					pixlSites[static_cast<uint32_t>(nearestPixl - modules[static_cast<size_t>(pixlIndex)].base)]++;
+				if (nearestPixl && pixlIndex >= 0) {
+					const auto pixlRva = static_cast<uint32_t>(nearestPixl - modules[static_cast<size_t>(pixlIndex)].base);
+					if (leaf == pixlIndex)
+						pixlSelf[pixlRva]++;
+					else
+						pixlSites[pixlRva]++;
+				}
+				if (leaf >= 0 && leaf != gameIndex && leaf != pixlIndex) {
+					const auto& owner = modules[static_cast<size_t>(leaf)];
+					const auto rva = static_cast<uint32_t>(context.Rip - owner.base);
+					const char* exportName = "?";
+					auto found = std::upper_bound(owner.exports.begin(), owner.exports.end(), rva,
+						[](uint32_t value, const auto& entry) { return value < entry.first; });
+					if (found != owner.exports.begin())
+						exportName = std::prev(found)->second;
+					auto& bucket = leafExports[{ static_cast<uint32_t>(leaf), exportName }];
+					bucket.samples++;
+					if (nearestPixl && pixlIndex >= 0)
+						bucket.pixlCallers[static_cast<uint32_t>(nearestPixl - modules[static_cast<size_t>(pixlIndex)].base)]++;
+					if (nearestGame && gameIndex >= 0)
+						bucket.gameCallers[static_cast<uint32_t>(nearestGame - modules[static_cast<size_t>(gameIndex)].base)]++;
+				}
 				if (leaf >= 0 && leaf != gameIndex && leaf != pixlIndex && nearestGame && gameIndex >= 0) {
 					const uint64_t key = (static_cast<uint64_t>(leaf) << 32) |
 					                     static_cast<uint32_t>(nearestGame - modules[static_cast<size_t>(gameIndex)].base);
@@ -257,8 +304,34 @@ namespace PerfProbe
 				logger::info("[PerfProbe] Sampler {:.1f}s, {} samples of the render thread", seconds, totalSamples);
 				logger::info("[PerfProbe]   executing in (exclusive):{}", leafText);
 				logger::info("[PerfProbe]   on call stack (inclusive):{}", stackText);
-				logger::info("[PerfProbe]   nearest PIXLRenderer.dll site (RVA):{}",
+				logger::info("[PerfProbe]   PIXLRenderer.dll executing (RVA):{}",
+					TopEntries(pixlSelf, 50, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
+				logger::info("[PerfProbe]   other code under nearest PIXLRenderer.dll site (RVA):{}",
 					TopEntries(pixlSites, 40, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
+				{
+					std::vector<std::pair<const ExportKey*, const ExportBucket*>> exportOrder;
+					for (const auto& [key, bucket] : leafExports)
+						exportOrder.emplace_back(&key, &bucket);
+					std::ranges::sort(exportOrder, [](const auto& lhs, const auto& rhs) { return lhs.second->samples > rhs.second->samples; });
+					std::string exportText;
+					for (size_t i = 0; i < exportOrder.size() && i < 20; ++i) {
+						const auto* bucket = exportOrder[i].second;
+						auto topCaller = [](const std::unordered_map<uint32_t, uint32_t>& callers) {
+							uint32_t best = 0, bestCount = 0;
+							for (const auto& [rva, hits] : callers)
+								if (hits > bestCount) {
+									best = rva;
+									bestCount = hits;
+								}
+							return std::pair{ best, bestCount };
+						};
+						const auto [pixlCaller, pixlHits] = topCaller(bucket->pixlCallers);
+						const auto [gameCaller, gameHits] = topCaller(bucket->gameCallers);
+						exportText += std::format(" {}!{}={:.2f}%(pixl {:X} x{}, game {:X} x{})", ModuleName(exportOrder[i].first->moduleIndex),
+							exportOrder[i].first->name, 100.0 * bucket->samples / total, pixlCaller, pixlHits, gameCaller, gameHits);
+					}
+					logger::info("[PerfProbe]   other DLL functions executing:{}", exportText);
+				}
 				logger::info("[PerfProbe]   SkyrimSE.exe executing (RVA):{}",
 					TopEntries(gameLeaf, 25, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
 				logger::info("[PerfProbe]   other DLL <- nearest SkyrimSE.exe site (RVA):{}",
@@ -270,6 +343,8 @@ namespace PerfProbe
 				exclusive.fill(0);
 				inclusive.fill(0);
 				pixlSites.clear();
+				pixlSelf.clear();
+				leafExports.clear();
 				gameLeaf.clear();
 				externalCalls.clear();
 			}
@@ -283,6 +358,27 @@ namespace PerfProbe
 			std::array<uint32_t, kMaxModules + 1> exclusive{};
 			std::array<uint32_t, kMaxModules> inclusive{};
 			std::unordered_map<uint32_t, uint32_t> pixlSites;
+			std::unordered_map<uint32_t, uint32_t> pixlSelf;
+			struct ExportKey
+			{
+				uint32_t moduleIndex = 0;
+				const char* name = nullptr;
+				bool operator==(const ExportKey&) const = default;
+			};
+			struct ExportKeyHash
+			{
+				size_t operator()(const ExportKey& a_key) const noexcept
+				{
+					return std::hash<const void*>{}(a_key.name) ^ (static_cast<size_t>(a_key.moduleIndex) * 0x9E3779B97F4A7C15ull);
+				}
+			};
+			struct ExportBucket
+			{
+				uint32_t samples = 0;
+				std::unordered_map<uint32_t, uint32_t> pixlCallers;
+				std::unordered_map<uint32_t, uint32_t> gameCallers;
+			};
+			std::unordered_map<ExportKey, ExportBucket, ExportKeyHash> leafExports;
 			std::unordered_map<uint32_t, uint32_t> gameLeaf;
 			std::unordered_map<uint64_t, uint32_t> externalCalls;
 		};

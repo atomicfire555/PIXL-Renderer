@@ -580,6 +580,7 @@ void OceanDynamics::BindWaterGeometryResources(const RE::BSGeometry* geometry, b
 					pendingOceanDraws.pop_front();
 				pendingOceanDraws.push_back(packet);
 			}
+			pendingOceanDrawCount.store(pendingOceanDraws.size(), std::memory_order_relaxed);
 			static std::atomic_bool queuedPacketLogged = false;
 			if (!queuedPacketLogged.exchange(true, std::memory_order_relaxed))
 				logger::info("[PIXL Ocean Dynamics] Queued classified water geometry {}: renderer VB {}, IA VB {}, stride {}, frame {}, setup thread {}",
@@ -780,6 +781,10 @@ bool OceanDynamics::BeginWaterDraw(ID3D11DeviceContext* context, bool indexedDra
 		globals::state->activeReflections || !indexedDraw)
 		return false;
 
+	// Nothing queued (the common case for every non-ocean draw): nothing can match.
+	if (pendingOceanDrawCount.load(std::memory_order_relaxed) == 0)
+		return false;
+
 	// Water setup can enqueue several classified tiles before the immediate draw
 	// hook. Match the exact IA buffer and consume one packet; stale packets expire
 	// after the next frame so an old coastline tile cannot replace a later draw.
@@ -799,10 +804,13 @@ bool OceanDynamics::BeginWaterDraw(ID3D11DeviceContext* context, bool indexedDra
 			[&candidateVertexBuffer](const PendingOceanDraw& draw) {
 				return draw.vertexBuffer == candidateVertexBuffer.get();
 			});
-		if (found == pendingOceanDraws.end())
+		if (found == pendingOceanDraws.end()) {
+			pendingOceanDrawCount.store(pendingOceanDraws.size(), std::memory_order_relaxed);
 			return false;
+		}
 		packet = *found;
 		pendingOceanDraws.erase(found);
+		pendingOceanDrawCount.store(pendingOceanDraws.size(), std::memory_order_relaxed);
 	}
 	if (candidateStride != packet.vertexStride) {
 		static std::atomic_bool strideMismatchLogged = false;
