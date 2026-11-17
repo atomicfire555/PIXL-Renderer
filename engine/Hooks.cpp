@@ -121,6 +121,13 @@ struct BSShader_LoadShaders
 
 		auto state = globals::state;
 		auto shaderCache = globals::shaderCache;
+		struct EnumerationScope
+		{
+			EnumerationScope() { SIE::ShaderCache::enumeratingShaderPackages = true; }
+			~EnumerationScope() { SIE::ShaderCache::enumeratingShaderPackages = false; }
+			EnumerationScope(const EnumerationScope&) = delete;
+			EnumerationScope& operator=(const EnumerationScope&) = delete;
+		} enumerationScope;
 		if (shaderCache->IsDiskCache() || shaderCache->IsDump()) {
 			if (shaderCache->IsDiskCache()) {
 				RenderModule::ForEachLoadedModule("GenerateShaderPermutations", [shader](RenderModule* feature) {
@@ -149,6 +156,17 @@ struct BSShader_LoadShaders
 				shaderCache->GetPixelShader(*shader, pixelShaderDescriptor);
 				state->ModifyShaderLookup(*shader, vertexShaderDesriptor, pixelShaderDescriptor, true);
 				shaderCache->GetPixelShader(*shader, pixelShaderDescriptor);
+			}
+			// Replay variants first requested during earlier gameplay (not listed in
+			// Skyrim's shader packages) so they are built or loaded here, at startup,
+			// instead of compiling mid-game. Descriptors are recorded post-lookup.
+			if (shaderCache->IsDiskCache()) {
+				shaderCache->ForEachRuntimeVariant(shader->shaderType.get(), [&](SIE::ShaderClass shaderClass, uint32_t descriptor) {
+					if (shaderClass == SIE::ShaderClass::Vertex)
+						shaderCache->GetVertexShader(*shader, descriptor);
+					else
+						shaderCache->GetPixelShader(*shader, descriptor);
+				});
 			}
 		}
 		BSShaderHooks::hk_LoadShaders((REX::BSShader*)shader, stream);

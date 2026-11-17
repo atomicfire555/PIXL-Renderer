@@ -1962,6 +1962,7 @@ namespace SIE
 			}
 		}
 
+		RecordRuntimeVariant(ShaderClass::Vertex, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Vertex, shader, descriptor });
 		} else {
@@ -2015,6 +2016,7 @@ namespace SIE
 			}
 		}
 
+		RecordRuntimeVariant(ShaderClass::Pixel, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor });
 		} else {
@@ -2066,6 +2068,104 @@ namespace SIE
 		}
 
 		return nullptr;
+	}
+
+	static const std::filesystem::path& RuntimeVariantManifestPath()
+	{
+		static const std::filesystem::path path{ L"Data/PIXL/RuntimeShaderVariants.txt" };
+		return path;
+	}
+
+	static uint64_t RuntimeVariantKey(RE::BSShader::Type type, ShaderClass shaderClass, uint32_t descriptor)
+	{
+		return (static_cast<uint64_t>(static_cast<uint32_t>(type)) << 40) |
+		       (static_cast<uint64_t>(static_cast<uint32_t>(shaderClass)) << 32) |
+		       static_cast<uint64_t>(descriptor);
+	}
+
+	// Format per line: "<BSShader::Type> <Vertex|Pixel> <hex descriptor>", e.g.
+	// "Lighting Pixel 1000213". Unknown or malformed lines are ignored.
+	static void LoadRuntimeVariantManifest(std::unordered_set<uint64_t>& out)
+	{
+		std::ifstream file(RuntimeVariantManifestPath());
+		if (!file) return;
+		std::string typeName, className, descriptorText;
+		size_t loaded = 0;
+		while (file >> typeName >> className >> descriptorText) {
+			const auto type = magic_enum::enum_cast<RE::BSShader::Type>(typeName);
+			const auto shaderClass = magic_enum::enum_cast<ShaderClass>(className);
+			if (!type || !shaderClass || (*shaderClass != ShaderClass::Vertex && *shaderClass != ShaderClass::Pixel) ||
+				*type == RE::BSShader::Type::ImageSpace)
+				continue;
+			uint32_t descriptor = 0;
+			const auto* first = descriptorText.data();
+			const auto* last = first + descriptorText.size();
+			const auto [end, ec] = std::from_chars(first, last, descriptor, 16);
+			if (ec != std::errc{} || end != last) continue;
+			if (out.insert(RuntimeVariantKey(*type, *shaderClass, descriptor)).second) ++loaded;
+		}
+		logger::info("[ShaderCache] Loaded {} runtime shader variant(s) for startup compilation", loaded);
+	}
+
+	void ShaderCache::RecordRuntimeVariant(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor)
+	{
+		// Startup enumeration runs before background compilation begins; only
+		// requests made during gameplay are new information.
+		if (enumeratingShaderPackages || !backgroundCompilation.load(std::memory_order_relaxed) || !IsDiskCache())
+			return;
+		if (shaderClass != ShaderClass::Vertex && shaderClass != ShaderClass::Pixel)
+			return;
+		const auto type = shader.shaderType.get();
+		if (type == RE::BSShader::Type::ImageSpace)  // resolved by name, not descriptor
+			return;
+		const auto key = RuntimeVariantKey(type, shaderClass, descriptor);
+		std::lock_guard lock(runtimeVariantsMutex);
+		if (!runtimeVariantsLoaded) {
+			LoadRuntimeVariantManifest(runtimeVariants);
+			runtimeVariantsLoaded = true;
+		}
+		if (!runtimeVariants.insert(key).second)
+			return;
+		const auto& path = RuntimeVariantManifestPath();
+		std::error_code ec;
+		std::filesystem::create_directories(path.parent_path(), ec);
+		std::ofstream file(path, std::ios::app);
+		char descriptorText[16]{};
+		std::snprintf(descriptorText, sizeof(descriptorText), "%X", descriptor);
+		if (file) {
+			file << magic_enum::enum_name(type) << ' ' << magic_enum::enum_name(shaderClass) << ' ' << descriptorText << '\n';
+		}
+		if (!file) {
+			static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+			if (!warned.test_and_set(std::memory_order_relaxed))
+				logger::warn("[ShaderCache] Could not write {}; gameplay-only shader variants will not be prebuilt next launch",
+					path.string());
+			return;
+		}
+		logger::info("[ShaderCache] Recorded gameplay shader variant {} {} {} for startup compilation",
+			magic_enum::enum_name(type), magic_enum::enum_name(shaderClass), descriptorText);
+	}
+
+	void ShaderCache::ForEachRuntimeVariant(RE::BSShader::Type type, const std::function<void(ShaderClass, uint32_t)>& callback)
+	{
+		std::vector<std::pair<ShaderClass, uint32_t>> matches;
+		{
+			std::lock_guard lock(runtimeVariantsMutex);
+			if (!runtimeVariantsLoaded) {
+				LoadRuntimeVariantManifest(runtimeVariants);
+				runtimeVariantsLoaded = true;
+			}
+			const auto typeBits = static_cast<uint64_t>(static_cast<uint32_t>(type));
+			for (const auto key : runtimeVariants) {
+				if ((key >> 40) != typeBits) continue;
+				matches.emplace_back(static_cast<ShaderClass>((key >> 32) & 0xFF), static_cast<uint32_t>(key));
+			}
+		}
+		std::sort(matches.begin(), matches.end());
+		// Callers request shaders, which may take other cache locks; never hold
+		// the manifest lock across the callback.
+		for (const auto& [shaderClass, descriptor] : matches)
+			callback(shaderClass, descriptor);
 	}
 
 	ShaderCache::~ShaderCache()
