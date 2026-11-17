@@ -126,7 +126,11 @@ namespace {
 
     bool IsCandidateLiquidGeometry(RE::BSGeometry* geometry)
     {
-        if (!geometry || IsExcludedLiquidGeometry(geometry->name.c_str())) return false;
+        // Every term below is a side-effect-free AND, so test the cheap owner
+        // lookup first: almost no draw belongs to a potion/beverage item, and this
+        // runs for every Lighting draw. The result is unchanged by the ordering.
+        if (!geometry || !FindLiquidOwner(geometry)) return false;
+        if (IsExcludedLiquidGeometry(geometry->name.c_str())) return false;
         const char* name=geometry->name.c_str();
         if (!IsLikelyLiquidGeometry(name) &&
             !HasAny(name,{"trishape","bsgeometry","geometry","shape"})) return false;

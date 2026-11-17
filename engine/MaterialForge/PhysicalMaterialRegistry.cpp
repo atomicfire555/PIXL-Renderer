@@ -212,6 +212,12 @@ namespace
 			descriptor.fuzzColor = { 1.0f, 1.0f, 1.0f };
 	}
 
+	// ObserveLegacy/ObservePBR run for every observed draw. Fur classification is
+	// a pure function of the raw diffuse texture name and the mesh path, so reuse
+	// the result for identical inputs. a_evidenceOnly selects the ObservePBR form
+	// (ClassifyFurEvidence directly, without the anatomy pre-checks).
+	float ClassifyFurCached(const RE::BSLightingShaderMaterialBase& material, std::string_view meshPath, bool a_evidenceOnly);
+
 	bool SamePayload(const PhysicalMaterial::TableEntry& left, const PhysicalMaterial::TableEntry& right)
 	{
 		if (left.bindingCount != right.bindingCount ||
@@ -305,7 +311,7 @@ namespace PhysicalMaterial
 
 		addBinding(Texture::BaseColor, ColorSpace::SRGB, material.diffuseTexture);
 		addBinding(Texture::Normal, ColorSpace::Linear, material.normalTexture);
-		ApplyAutomaticFurSemantics(descriptor, ClassifyAutomaticFur(material));
+		ApplyAutomaticFurSemantics(descriptor, ClassifyFurCached(material, {}, false));
 
 		using enum RE::BSShaderMaterial::Feature;
 		switch (material.GetFeature()) {
@@ -346,12 +352,9 @@ namespace PhysicalMaterial
 	MaterialID Registry::ObservePBR(const BSLightingShaderMaterialPBR& material, const Descriptor& descriptor)
 	{
 		Descriptor resolvedDescriptor = descriptor;
-		const std::string diffusePath = material.diffuseTexture
-			? NormalizeResourceName(*material.diffuseTexture)
-			: std::string{};
 		ApplyAutomaticFurSemantics(
 			resolvedDescriptor,
-			ClassifyFurEvidence(diffusePath, material.inputFilePath));
+			ClassifyFurCached(material, material.inputFilePath, true));
 		const std::array bindings{
 			SourceBinding{ Texture::BaseColor, ColorSpace::SRGB, material.diffuseTexture.get() },
 			SourceBinding{ Texture::Normal, ColorSpace::Linear, material.normalTexture.get() },
@@ -459,17 +462,33 @@ namespace PhysicalMaterial
 
 	TextureID Registry::ResolveTexture(const RE::NiSourceTexture& texture)
 	{
+		const char* rawName = texture.name.c_str();
+		if (rawName != nullptr && *rawName != '\0') {
+			// Same texture object with the same name text: the normalized name, and
+			// therefore its permanent namedTextures_ ID, is unchanged.
+			if (const auto cached = textureNameCache_.find(&texture);
+				cached != textureNameCache_.end() && cached->second.namePointer == rawName && cached->second.rawName == rawName) {
+				return cached->second.id;
+			}
+		}
+		auto rememberName = [&](TextureID a_id) {
+			if (textureNameCache_.size() >= 65536)
+				textureNameCache_.clear();
+			textureNameCache_.insert_or_assign(&texture, CachedTextureName{ rawName, rawName, a_id });
+			return a_id;
+		};
+
 		const auto resourceName = NormalizeResourceName(texture);
 		if (!resourceName.empty()) {
 			if (const auto found = namedTextures_.find(resourceName); found != namedTextures_.end()) {
-				return found->second;
+				return rememberName(found->second);
 			}
 
 			const TextureID id = nextTextureID_++;
 			namedTextures_.emplace(resourceName, id);
 			textures_.emplace(id, TextureSource{ id, 1, true, resourceName });
 			generation_++;
-			return id;
+			return rememberName(id);
 		}
 
 		if (const auto found = runtimeTextures_.find(&texture); found != runtimeTextures_.end()) {
@@ -587,5 +606,38 @@ namespace PhysicalMaterial
 		}
 
 		return diagnostics;
+	}
+}
+
+namespace
+{
+	float ClassifyFurCached(const RE::BSLightingShaderMaterialBase& material, std::string_view meshPath, bool a_evidenceOnly)
+	{
+		static std::mutex furCacheMutex;
+		static std::unordered_map<std::string, float> furCache;
+		thread_local std::string furKey;
+		const char* diffuseName = material.diffuseTexture ? material.diffuseTexture->name.c_str() : nullptr;
+		furKey.clear();
+		furKey.push_back(a_evidenceOnly ? 'E' : 'A');
+		furKey.append(diffuseName ? diffuseName : "");
+		furKey.push_back('\x1F');
+		furKey.append(meshPath);
+		{
+			std::lock_guard lock(furCacheMutex);
+			if (const auto found = furCache.find(furKey); found != furCache.end())
+				return found->second;
+		}
+		float confidence = 0.0f;
+		if (a_evidenceOnly) {
+			const std::string diffusePath = material.diffuseTexture ? NormalizeResourceName(*material.diffuseTexture) : std::string{};
+			confidence = ClassifyFurEvidence(diffusePath, meshPath);
+		} else {
+			confidence = PhysicalMaterial::ClassifyAutomaticFur(material, meshPath);
+		}
+		std::lock_guard lock(furCacheMutex);
+		if (furCache.size() >= 65536)
+			furCache.clear();
+		furCache.insert_or_assign(furKey, confidence);
+		return confidence;
 	}
 }

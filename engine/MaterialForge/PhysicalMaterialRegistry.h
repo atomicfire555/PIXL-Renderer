@@ -158,6 +158,16 @@ namespace PhysicalMaterial
 		std::unordered_map<MaterialID, TableEntry> materials_;
 		std::unordered_map<std::string, TextureID> namedTextures_;
 		std::unordered_map<const RE::NiSourceTexture*, TextureID> runtimeTextures_;
+		// ResolveTexture runs for every bound texture of every observed draw. Its
+		// result only depends on the texture's name (namedTextures_ is never pruned),
+		// so remember the last raw name seen per texture object and its ID.
+		struct CachedTextureName
+		{
+			const char* namePointer = nullptr;
+			std::string rawName;
+			TextureID id = 0;
+		};
+		std::unordered_map<const RE::NiSourceTexture*, CachedTextureName> textureNameCache_;
 		std::unordered_map<TextureID, TextureSource> textures_;
 		MaterialID nextMaterialID_ = 1;
 		TextureID nextTextureID_ = 1;

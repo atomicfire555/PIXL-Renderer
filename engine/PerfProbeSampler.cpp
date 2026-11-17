@@ -305,9 +305,9 @@ namespace PerfProbe
 				logger::info("[PerfProbe]   executing in (exclusive):{}", leafText);
 				logger::info("[PerfProbe]   on call stack (inclusive):{}", stackText);
 				logger::info("[PerfProbe]   PIXLRenderer.dll executing (RVA):{}",
-					TopEntries(pixlSelf, 50, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
+					TopEntries(pixlSelf, 400, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
 				logger::info("[PerfProbe]   other code under nearest PIXLRenderer.dll site (RVA):{}",
-					TopEntries(pixlSites, 40, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
+					TopEntries(pixlSites, 150, total, [](uint32_t rva, double percent) { return std::format(" {:X}={:.2f}%", rva, percent); }));
 				{
 					std::vector<std::pair<const ExportKey*, const ExportBucket*>> exportOrder;
 					for (const auto& [key, bucket] : leafExports)
