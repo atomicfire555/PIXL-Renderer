@@ -124,7 +124,26 @@ namespace {
         return nullptr;
     }
 
+    bool IsCandidateLiquidGeometryUncached(RE::BSGeometry* geometry);
+
+    // The draw hook and SetupGeometry both classify the same geometry back to back
+    // for every Lighting draw. The scene graph does not change while a frame is
+    // being rendered, so reuse the answer for the same geometry within a frame.
     bool IsCandidateLiquidGeometry(RE::BSGeometry* geometry)
+    {
+        thread_local RE::BSGeometry* lastGeometry = nullptr;
+        thread_local std::uint32_t lastFrame = 0;
+        thread_local bool lastResult = false;
+        const std::uint32_t frame = globals::state ? static_cast<std::uint32_t>(globals::state->frameCount) : 0u;
+        if (geometry && geometry == lastGeometry && frame == lastFrame && globals::state)
+            return lastResult;
+        lastResult = IsCandidateLiquidGeometryUncached(geometry);
+        lastGeometry = geometry;
+        lastFrame = frame;
+        return lastResult;
+    }
+
+    bool IsCandidateLiquidGeometryUncached(RE::BSGeometry* geometry)
     {
         // Every term below is a side-effect-free AND, so test the cheap owner
         // lookup first: almost no draw belongs to a potion/beverage item, and this

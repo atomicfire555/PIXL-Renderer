@@ -524,14 +524,26 @@ namespace MaterialForgeTessellation
 		float fadeStart,
 		float fadeEnd) noexcept
 	{
-		gPendingMaterialForgeTessellation = MaterialForgeTessellationParameters{};
-		gPendingMaterialForgeTessellationArmed = true;
-		if (!std::isfinite(displacementScale) || !std::isfinite(maximumTessellationFactor) || displacementScale <= 0.f)
+		// Leaving the block default-constructed is what the original reset did; only
+		// pay for that reset (and the next draw's exchange) when it actually holds data.
+		auto disarm = [] {
+			if (gPendingMaterialForgeTessellationArmed) {
+				gPendingMaterialForgeTessellation = MaterialForgeTessellationParameters{};
+				gPendingMaterialForgeTessellationArmed = false;
+			}
+		};
+		if (!std::isfinite(displacementScale) || !std::isfinite(maximumTessellationFactor) || displacementScale <= 0.f) {
+			disarm();
 			return;
+		}
 
 		auto* context = globals::d3d::context;
-		if (!context)
+		if (!context) {
+			disarm();
 			return;
+		}
+		gPendingMaterialForgeTessellation = MaterialForgeTessellationParameters{};
+		gPendingMaterialForgeTessellationArmed = true;
 
 		auto& parameters = gPendingMaterialForgeTessellation;
 		parameters.displacementScale = std::clamp(displacementScale, 0.f, 0.75f);

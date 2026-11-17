@@ -3002,6 +3002,10 @@ RadiantGrid::VertexColorCacheEntry RadiantGrid::GetIncandescentGeometryLightConf
 		return {};
 
 	auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(lightingProperty->material);
+	// Only glow-mapped materials can produce an entry; every other material
+	// resolves (and is cached) as empty below, so answer that without the lock.
+	if (!material || material->GetFeature() != RE::BSShaderMaterial::Feature::kGlowMap)
+		return {};
 	{
 		// Geometry setup is also on the render path; do not wait behind particle
 		// queue/cache maintenance merely to classify an optional emissive proxy.
