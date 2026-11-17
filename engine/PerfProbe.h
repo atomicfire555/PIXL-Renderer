@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
 
 /**
@@ -38,9 +39,15 @@ namespace PerfProbe
 	inline std::array<std::atomic<int64_t>, static_cast<size_t>(Bucket::Count)> bucketTicks{};
 	inline std::atomic<uint64_t> drawFlushes{ 0 };
 
-	// Render-thread only: per-module CPU ticks in per-frame callbacks.
+	// Per-module CPU ticks in per-frame callbacks (guarded: the game can move
+	// rendering between threads across loading screens).
+	inline std::mutex moduleTicksMutex;
 	inline std::unordered_map<const void*, int64_t> moduleTicks;
-	inline void AddModuleTicks(const void* a_module, int64_t a_ticks) { moduleTicks[a_module] += a_ticks; }
+	inline void AddModuleTicks(const void* a_module, int64_t a_ticks)
+	{
+		std::lock_guard lock(moduleTicksMutex);
+		moduleTicks[a_module] += a_ticks;
+	}
 
 	inline int64_t Now()
 	{
@@ -68,4 +75,7 @@ namespace PerfProbe
 
 	/** Called once per frame at the top of Present; logs a summary every few seconds. */
 	void OnFrame();
+
+	/** Starts the ~1 kHz render-thread sampler; call from the render thread. */
+	void StartSampler();
 }

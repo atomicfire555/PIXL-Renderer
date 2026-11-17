@@ -56,7 +56,14 @@ namespace PerfProbe
 	void OnFrame()
 	{
 		static WindowState probeWindow{};
+		static DWORD presentThreadId = 0;
 		const int64_t probeNow = Now();
+		if (GetCurrentThreadId() != presentThreadId) {
+			// Presenting moved to another thread: restart the window so the
+			// per-thread CPU numbers stay meaningful, and retarget the sampler.
+			presentThreadId = GetCurrentThreadId();
+			probeWindow.windowStart = 0;
+		}
 		if (probeWindow.frequency == 0) {
 			LARGE_INTEGER probeFrequency{};
 			QueryPerformanceFrequency(&probeFrequency);
@@ -72,7 +79,11 @@ namespace PerfProbe
 			for (auto& ticks : bucketTicks)
 				ticks.store(0, std::memory_order_relaxed);
 			drawFlushes.store(0, std::memory_order_relaxed);
-			moduleTicks.clear();
+			{
+				std::lock_guard lock(moduleTicksMutex);
+				moduleTicks.clear();
+			}
+			StartSampler();
 			logger::info("[PerfProbe] CPU frame breakdown enabled; a summary is logged every {:.0f}s", kReportSeconds);
 			return;
 		}
@@ -94,7 +105,8 @@ namespace PerfProbe
 		const double frameMs = windowMs / probeFrames;
 		const uint64_t threadCpu = ThreadCpu100ns();
 		const uint64_t processCpu = ProcessCpu100ns();
-		const double renderThreadBusyMs = static_cast<double>(threadCpu - probeWindow.threadCpuStart) / 10000.0 / probeFrames;
+		const double renderThreadBusyMs = threadCpu >= probeWindow.threadCpuStart ?
+		                                      static_cast<double>(threadCpu - probeWindow.threadCpuStart) / 10000.0 / probeFrames : 0.0;
 		const double processCores = static_cast<double>(processCpu - probeWindow.processCpuStart) / 10000.0 / windowMs;
 
 		auto perFrame = [&](Bucket bucket) {
@@ -106,12 +118,15 @@ namespace PerfProbe
 			probeHooks += std::format(" {}={:.2f}", kBucketNames[i], perFrame(static_cast<Bucket>(i)));
 
 		std::vector<std::pair<double, RenderModule*>> probeModuleTimes;
-		for (auto* renderModule : RenderModule::GetModuleList()) {
-			const auto found = moduleTicks.find(renderModule);
-			if (found != moduleTicks.end() && found->second > 0)
-				probeModuleTimes.emplace_back(static_cast<double>(found->second) * ticksToMs / probeFrames, renderModule);
+		{
+			std::lock_guard lock(moduleTicksMutex);
+			for (auto* renderModule : RenderModule::GetModuleList()) {
+				const auto found = moduleTicks.find(renderModule);
+				if (found != moduleTicks.end() && found->second > 0)
+					probeModuleTimes.emplace_back(static_cast<double>(found->second) * ticksToMs / probeFrames, renderModule);
+			}
+			moduleTicks.clear();
 		}
-		moduleTicks.clear();
 		std::ranges::sort(probeModuleTimes, [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
 		double moduleTotalMs = 0.0;
 		std::string probeModules;
@@ -137,14 +152,14 @@ namespace PerfProbe
 		const bool probeCompiling = globals::shaderCache && globals::shaderCache->IsCompiling();
 		logger::info(
 			"[PerfProbe] {:.1f} fps | frame {:.2f} ms avg, worst {:.1f} ms | render thread CPU busy {:.2f} ms/frame ({:.0f}%) | "
-			"process CPU {:.1f} cores | draw flushes {:.0f}/frame | shaders probeCompiling: {}",
+			"process CPU {:.1f} cores | draw flushes {:.0f}/frame | shaders compiling: {}",
 			1000.0 / frameMs, frameMs, probeWindow.worstFrameMs, renderThreadBusyMs,
 			100.0 * renderThreadBusyMs / frameMs, processCores,
 			static_cast<double>(drawFlushes.exchange(0, std::memory_order_relaxed)) / probeFrames,
 			probeCompiling ? "yes" : "no");
-		logger::info("[PerfProbe]   PIXL probeHooks ms/frame:{}", probeHooks);
-		logger::info("[PerfProbe]   PIXL probeModules CPU ms/frame (total {:.2f}):{}", moduleTotalMs, probeModules);
-		logger::info("[PerfProbe]   PIXL probePasses ms (GPU total {:.2f}, CPU total {:.2f}):{}",
+		logger::info("[PerfProbe]   PIXL hooks ms/frame:{}", probeHooks);
+		logger::info("[PerfProbe]   PIXL modules CPU ms/frame (total {:.2f}):{}", moduleTotalMs, probeModules);
+		logger::info("[PerfProbe]   PIXL passes ms (GPU total {:.2f}, CPU total {:.2f}):{}",
 			probeWindow.gpuPassSumMs / probeFrames, probeWindow.cpuPassSumMs / probeFrames, probePasses);
 
 		probeWindow.windowStart = probeNow;
