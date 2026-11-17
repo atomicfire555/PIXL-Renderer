@@ -3560,6 +3560,20 @@ namespace SIE
 		const uint64_t doneIncludingCurrent = (done < total) ? (done + 1) : total;
 		const uint64_t remaining = (total > doneIncludingCurrent) ? (total - doneIncludingCurrent) : 0;
 
+		// Gameplay diagnostic at normal log level: every shader that actually
+		// compiles (not a disk-cache load) after the game has started, with how
+		// long it took and how much work is still pending.
+		if (backgroundCompilation.load(std::memory_order_relaxed) && !IsShaderLoadedFromDisk(taskKey)) {
+			static std::atomic<uint64_t> gameplayCompiledShaders{ 0 };
+			const auto gameplayTaskId = task.GetId();
+			const auto gameplayCompiledTotal = gameplayCompiledShaders.fetch_add(1, std::memory_order_relaxed) + 1;
+			logger::info("[GameplayCompile] Compiled {} {} {:X} during gameplay in {:.1f}s ({} still pending; {} compiled during gameplay this session)",
+				magic_enum::enum_name(task.GetShaderType()), magic_enum::enum_name(static_cast<ShaderClass>(gameplayTaskId >> 60)),
+				static_cast<uint32_t>(gameplayTaskId & 0xFFFFFFFFu), elapsedMs / 1000.0, remaining, gameplayCompiledTotal);
+			if (remaining == 0)
+				logger::info("[GameplayCompile] Gameplay shader compilation finished: {} shader(s) compiled during gameplay this session; next launch builds them at the main menu.", gameplayCompiledTotal);
+		}
+
 		// Proxy for permutation complexity: descriptor low 32 bits from GetId(); popcount = active defines.
 		// Shader file size provides a secondary signal for source complexity.
 		const auto descriptorComplexity = std::popcount(static_cast<uint32_t>(task.GetId()));
