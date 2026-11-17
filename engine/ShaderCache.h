@@ -485,12 +485,14 @@ namespace SIE
 		 * Runtime variant manifest. Skyrim's shader packages do not list every
 		 * permutation modded content uses (e.g. skinned meshes with vertex
 		 * colors), so those are first requested during gameplay and compiled
-		 * there. Each such vertex/pixel shader that compiles during gameplay is
-		 * recorded once (from the compile worker, not the render thread) to
+		 * there. Each such vertex/pixel request is recorded once (in memory on the
+		 * render thread; the file is written by a compile worker) to
 		 * Data/PIXL/RuntimeShaderVariants.txt and replayed by the startup
 		 * enumeration, so later sessions build them at the main menu instead.
 		 */
 		void RecordRuntimeVariant(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor);
+		/** Writes recorded variants to the manifest; called from compile workers. */
+		void FlushRuntimeVariants();
 		void ForEachRuntimeVariant(RE::BSShader::Type type, const std::function<void(ShaderClass, uint32_t)>& callback);
 		/** Set while BSShader::LoadShaders enumerates Skyrim's package permutations on this thread. */
 		static inline thread_local bool enumeratingShaderPackages = false;
@@ -840,6 +842,8 @@ namespace SIE
 		std::mutex runtimeVariantsMutex;
 		bool runtimeVariantsLoaded = false;
 		std::unordered_set<uint64_t> runtimeVariants;
+		std::vector<std::string> pendingRuntimeVariantLines;
+		std::mutex runtimeVariantsFileMutex;
 		std::mutex computeShadersMutex;
 		CompilationSet compilationSet;
 		std::mutex activeCompilationMutex;

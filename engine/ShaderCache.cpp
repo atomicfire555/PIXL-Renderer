@@ -1962,6 +1962,7 @@ namespace SIE
 			}
 		}
 
+		RecordRuntimeVariant(ShaderClass::Vertex, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Vertex, shader, descriptor });
 		} else {
@@ -2015,6 +2016,7 @@ namespace SIE
 			}
 		}
 
+		RecordRuntimeVariant(ShaderClass::Pixel, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor });
 		} else {
@@ -2124,15 +2126,31 @@ namespace SIE
 		}
 		if (!runtimeVariants.insert(key).second)
 			return;
+		// Called from the render thread: no file I/O or logging here. The line is
+		// written by the next compile worker (FlushRuntimeVariants), which runs
+		// as soon as this request's compile task is dispatched.
+		char descriptorText[16]{};
+		std::snprintf(descriptorText, sizeof(descriptorText), "%X", descriptor);
+		pendingRuntimeVariantLines.emplace_back(std::string(magic_enum::enum_name(type)) + ' ' +
+			std::string(magic_enum::enum_name(shaderClass)) + ' ' + descriptorText);
+	}
+
+	void ShaderCache::FlushRuntimeVariants()
+	{
+		std::vector<std::string> lines;
+		{
+			std::lock_guard lock(runtimeVariantsMutex);
+			if (pendingRuntimeVariantLines.empty())
+				return;
+			lines.swap(pendingRuntimeVariantLines);
+		}
+		std::lock_guard fileLock(runtimeVariantsFileMutex);
 		const auto& path = RuntimeVariantManifestPath();
 		std::error_code ec;
 		std::filesystem::create_directories(path.parent_path(), ec);
 		std::ofstream file(path, std::ios::app);
-		char descriptorText[16]{};
-		std::snprintf(descriptorText, sizeof(descriptorText), "%X", descriptor);
-		if (file) {
-			file << magic_enum::enum_name(type) << ' ' << magic_enum::enum_name(shaderClass) << ' ' << descriptorText << '\n';
-		}
+		for (const auto& line : lines)
+			if (file) file << line << '\n';
 		if (!file) {
 			static std::atomic_flag warned = ATOMIC_FLAG_INIT;
 			if (!warned.test_and_set(std::memory_order_relaxed))
@@ -2140,8 +2158,8 @@ namespace SIE
 					path.string());
 			return;
 		}
-		logger::info("[ShaderCache] Recorded gameplay shader variant {} {} {} for startup compilation",
-			magic_enum::enum_name(type), magic_enum::enum_name(shaderClass), descriptorText);
+		for (const auto& line : lines)
+			logger::info("[ShaderCache] Recorded gameplay shader variant {} for startup compilation", line);
 	}
 
 	void ShaderCache::ForEachRuntimeVariant(RE::BSShader::Type type, const std::function<void(ShaderClass, uint32_t)>& callback)
@@ -3508,6 +3526,7 @@ namespace SIE
 
 	void ShaderCache::ProcessCompilationSet(std::stop_token stoken, SIE::ShaderCompilationTask task)
 	{
+		FlushRuntimeVariants();
 		if (stoken.stop_requested() || task.GetGeneration() != compilationSet.generation.load(std::memory_order_acquire)) {
 			return;
 		}
@@ -3568,9 +3587,6 @@ namespace SIE
 			logger::info("[GameplayCompile] Compiled {} {} {:X} during gameplay in {:.1f}s ({} still pending; {} compiled during gameplay this session)",
 				magic_enum::enum_name(task.GetShaderType()), magic_enum::enum_name(static_cast<ShaderClass>(gameplayTaskId >> 60)),
 				static_cast<uint32_t>(gameplayTaskId & 0xFFFFFFFFu), elapsedMs / 1000.0, remaining, gameplayCompiledTotal);
-			// Remember it so the next launch builds it at the main menu. This runs on
-			// the compile worker, never on the game's render thread.
-			RecordRuntimeVariant(task.GetShaderClass(), task.GetShader(), task.GetDescriptor());
 			if (remaining == 0)
 				logger::info("[GameplayCompile] Gameplay shader compilation finished: {} shader(s) compiled during gameplay this session; next launch builds them at the main menu.", gameplayCompiledTotal);
 		}
