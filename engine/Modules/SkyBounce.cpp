@@ -537,7 +537,10 @@ RE::BSShaderProperty::RenderPassArray* SkyBounce::BSLightingShaderProperty_GetPr
 			}
 
 			if (fadeNode) {
-				if (auto extraData = fadeNode->GetExtraData("BSX")) {
+				// Constructing the name from a literal goes through Skyrim's global
+				// string pool (strlen, hash, lock) for every occlusion geometry.
+				static const RE::BSFixedString bsxExtraDataName("BSX");
+				if (auto extraData = fadeNode->GetExtraData(bsxExtraDataName)) {
 					auto bsxFlags = (RE::BSXFlags*)extraData;
 					auto value = static_cast<int32_t>(bsxFlags->value);
 

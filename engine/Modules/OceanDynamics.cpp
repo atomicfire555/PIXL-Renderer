@@ -784,6 +784,13 @@ bool OceanDynamics::BeginWaterDraw(ID3D11DeviceContext* context, bool indexedDra
 	// Nothing queued (the common case for every non-ocean draw): nothing can match.
 	if (pendingOceanDrawCount.load(std::memory_order_relaxed) == 0)
 		return false;
+	// Packets are queued by BSWaterShader geometry setup for that water mesh's
+	// own vertex buffer, so only a draw issued under the Water shader technique
+	// can match one. Skip the IA query, lock and scan for every other draw while
+	// ocean tiles are queued (all draws of a coastal city, for example).
+	if (const auto* activeShader = globals::state->currentShader;
+		activeShader && activeShader->shaderType.get() != RE::BSShader::Type::Water)
+		return false;
 
 	// Water setup can enqueue several classified tiles before the immediate draw
 	// hook. Match the exact IA buffer and consume one packet; stale packets expire
