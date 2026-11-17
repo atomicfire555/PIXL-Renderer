@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <unordered_map>
 
 /**
  * Always-on CPU frame breakdown for diagnosing low frame rates.
@@ -36,6 +37,10 @@ namespace PerfProbe
 
 	inline std::array<std::atomic<int64_t>, static_cast<size_t>(Bucket::Count)> bucketTicks{};
 	inline std::atomic<uint64_t> drawFlushes{ 0 };
+
+	// Render-thread only: per-module CPU ticks in per-frame callbacks.
+	inline std::unordered_map<const void*, int64_t> moduleTicks;
+	inline void AddModuleTicks(const void* a_module, int64_t a_ticks) { moduleTicks[a_module] += a_ticks; }
 
 	inline int64_t Now()
 	{

@@ -72,8 +72,7 @@ namespace PerfProbe
 			for (auto& ticks : bucketTicks)
 				ticks.store(0, std::memory_order_relaxed);
 			drawFlushes.store(0, std::memory_order_relaxed);
-			for (auto* renderModule : RenderModule::GetModuleList())
-				renderModule->perfProbeTicks = 0;
+			moduleTicks.clear();
 			logger::info("[PerfProbe] CPU frame breakdown enabled; a summary is logged every {:.0f}s", kReportSeconds);
 			return;
 		}
@@ -108,10 +107,11 @@ namespace PerfProbe
 
 		std::vector<std::pair<double, RenderModule*>> probeModuleTimes;
 		for (auto* renderModule : RenderModule::GetModuleList()) {
-			if (renderModule->perfProbeTicks > 0)
-				probeModuleTimes.emplace_back(static_cast<double>(renderModule->perfProbeTicks) * ticksToMs / probeFrames, renderModule);
-			renderModule->perfProbeTicks = 0;
+			const auto found = moduleTicks.find(renderModule);
+			if (found != moduleTicks.end() && found->second > 0)
+				probeModuleTimes.emplace_back(static_cast<double>(found->second) * ticksToMs / probeFrames, renderModule);
 		}
+		moduleTicks.clear();
 		std::ranges::sort(probeModuleTimes, [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
 		double moduleTotalMs = 0.0;
 		std::string probeModules;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PerfProbe.h"
 #include "ModuleGroups.h"
 #include "ModuleRules.h"
 #include "ModuleVersions.h"
@@ -65,8 +66,6 @@ virtual const void* GetSettingsBlob() const { return nullptr; }
 	// Whether the feature .ini is present on disk. Unlike `loaded` this stays true for
 	// features disabled at boot, so they remain reachable in the UI.
 	bool installed = false;
-	// [PerfProbe] CPU ticks spent in this module's per-frame callbacks since the last report.
-	int64_t perfProbeTicks = 0;
 	std::string version;
 	std::string failedLoadedMessage;
 
@@ -405,7 +404,7 @@ public:
 				if (perFrame) {
 					LARGE_INTEGER probeEnd{};
 					QueryPerformanceCounter(&probeEnd);
-					feature->perfProbeTicks += probeEnd.QuadPart - probeBegin.QuadPart;
+					PerfProbe::AddModuleTicks(feature, probeEnd.QuadPart - probeBegin.QuadPart);
 				}
 			}
 		}
