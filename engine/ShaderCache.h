@@ -163,6 +163,9 @@ namespace SIE
 		/** Gets the cached LPT scheduling priority. */
 		int GetPriority() const { return cachedPriority; }
 		RE::BSShader::Type GetShaderType() const { return shader.shaderType.get(); }
+		ShaderClass GetShaderClass() const { return shaderClass; }
+		const RE::BSShader& GetShader() const { return shader; }
+		uint32_t GetDescriptor() const { return descriptor; }
 		/** @brief Records the QPC timestamp when this task was enqueued. */
 		void SetEnqueuedQpc(int64_t qpc) { enqueuedQpc = qpc; }
 		/** @brief Gets the QPC timestamp when this task was enqueued. */
@@ -482,7 +485,8 @@ namespace SIE
 		 * Runtime variant manifest. Skyrim's shader packages do not list every
 		 * permutation modded content uses (e.g. skinned meshes with vertex
 		 * colors), so those are first requested during gameplay and compiled
-		 * there. Each such vertex/pixel request is recorded once to
+		 * there. Each such vertex/pixel shader that compiles during gameplay is
+		 * recorded once (from the compile worker, not the render thread) to
 		 * Data/PIXL/RuntimeShaderVariants.txt and replayed by the startup
 		 * enumeration, so later sessions build them at the main menu instead.
 		 */

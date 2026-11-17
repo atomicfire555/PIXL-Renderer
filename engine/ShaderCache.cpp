@@ -1962,7 +1962,6 @@ namespace SIE
 			}
 		}
 
-		RecordRuntimeVariant(ShaderClass::Vertex, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Vertex, shader, descriptor });
 		} else {
@@ -2016,7 +2015,6 @@ namespace SIE
 			}
 		}
 
-		RecordRuntimeVariant(ShaderClass::Pixel, shader, descriptor);
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor });
 		} else {
@@ -3570,6 +3568,9 @@ namespace SIE
 			logger::info("[GameplayCompile] Compiled {} {} {:X} during gameplay in {:.1f}s ({} still pending; {} compiled during gameplay this session)",
 				magic_enum::enum_name(task.GetShaderType()), magic_enum::enum_name(static_cast<ShaderClass>(gameplayTaskId >> 60)),
 				static_cast<uint32_t>(gameplayTaskId & 0xFFFFFFFFu), elapsedMs / 1000.0, remaining, gameplayCompiledTotal);
+			// Remember it so the next launch builds it at the main menu. This runs on
+			// the compile worker, never on the game's render thread.
+			RecordRuntimeVariant(task.GetShaderClass(), task.GetShader(), task.GetDescriptor());
 			if (remaining == 0)
 				logger::info("[GameplayCompile] Gameplay shader compilation finished: {} shader(s) compiled during gameplay this session; next launch builds them at the main menu.", gameplayCompiledTotal);
 		}
