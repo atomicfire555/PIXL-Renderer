@@ -20,6 +20,11 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       CMAKE_BUILD_PARALLEL_LEVEL: 4
     steps:
+      # Windows runners default to core.autocrlf=true, which rewrites the vcpkg
+      # overlay-port and FidelityFX .patch files to CRLF and makes them "corrupt".
+      - name: Keep checkout line endings as committed
+        run: git config --global core.autocrlf false
+
       - name: Check out source and submodules
         uses: actions/checkout@v5
         with:
