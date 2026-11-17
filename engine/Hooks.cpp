@@ -5,6 +5,7 @@
 
 #include "RenderModule.h"
 #include "Globals.h"
+#include "PerfProbe.h"
 #include "Menu.h"
 #include "Menu/TuningWorkspaceRenderer.h"
 #include "ShaderCache.h"
@@ -176,6 +177,7 @@ struct BSShader_LoadShaders
 
 bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertexDescriptor, uint32_t pixelDescriptor, bool skipPixelShader)
 {
+	PerfProbe::Scope probeBeginTechnique(PerfProbe::Bucket::BeginTechnique);
 	auto state = globals::state;
 	auto shaderCache = globals::shaderCache;
 	const bool measure = globals::menu && globals::menu->overlayVisible &&
@@ -200,7 +202,11 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 	// Only check against non-shader bits
 	state->permutationData.PixelShaderDescriptor &= ~state->modifiedPixelDescriptor;
 
-	bool shaderFound = func(shader, vertexDescriptor, pixelDescriptor, skipPixelShader);
+	bool shaderFound = false;
+	{
+		PerfProbe::Scope probeNative(PerfProbe::Bucket::BeginTechniqueNative);
+		shaderFound = func(shader, vertexDescriptor, pixelDescriptor, skipPixelShader);
+	}
 
 	if (!shaderFound && shader->shaderType.get() != RE::BSShader::Type::Effect) {
 		RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*shader, state->modifiedVertexDescriptor);
@@ -393,6 +399,8 @@ struct IDXGISwapChain_Present
 {
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
+		PerfProbe::OnFrame();
+		PerfProbe::Scope probePresent(PerfProbe::Bucket::PresentHook);
 		globals::state->Reset();
 		// The D3D12 compatibility swapchain paces itself immediately before its
 		// own present. Native D3D11 uses the same PIXL limiter here.
@@ -506,9 +514,17 @@ void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 		globals::pipeline::pulseProfiler.loaded && globals::pipeline::pulseProfiler.IsOverlayVisible();
 	LARGE_INTEGER before{}, afterNative{}, afterPixl{};
 	if (measure) QueryPerformanceCounter(&before);
-	func(isCompute);
+	if (!isCompute)
+		PerfProbe::drawFlushes.fetch_add(1, std::memory_order_relaxed);
+	{
+		PerfProbe::Scope probeNative(PerfProbe::Bucket::DirtyStateNative);
+		func(isCompute);
+	}
 	if (measure) QueryPerformanceCounter(&afterNative);
-	globals::state->Draw();
+	{
+		PerfProbe::Scope probePixl(PerfProbe::Bucket::DirtyStatePixl);
+		globals::state->Draw();
+	}
 	if (measure) {
 		QueryPerformanceCounter(&afterPixl);
 		globals::state->RecordDirtyStateTiming(
@@ -1411,6 +1427,7 @@ namespace Hooks
 
 		static void thunk(RE::BSGraphics::PixelShader* PixelShader, RE::BSRenderPass* Pass, DirectX::XMMATRIX& Transform, uint32_t LightCount, uint32_t ShadowLightCount, float WorldScale, uint32_t RenderSpace)
 		{
+			PerfProbe::Scope probePointLights(PerfProbe::Bucket::PointLights);
 			// Keep the native helper and the full RadiantGrid collection path;
 			// only the per-draw memory metadata cache is changed in this test.
 			thread_local RegionValidationCache validationCache{};

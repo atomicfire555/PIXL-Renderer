@@ -10,6 +10,7 @@
 #include "../ImageReconstruction.h"
 #include "FidelityFX.h"
 #include "Streamline.h"
+#include "PerfProbe.h"
 
 namespace
 {
@@ -301,6 +302,7 @@ HRESULT DX12SwapChain::GetBuffer(UINT buffer, REFIID riid, void** ppSurface)
 
 HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 {
+	PerfProbe::Scope probeDX12Present(PerfProbe::Bucket::DX12Present);
 	if (!swapChain)
 		return DXGI_ERROR_INVALID_CALL;
 	// A DXGI test present must not submit rendering, advance fences or
@@ -357,6 +359,7 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 		const HRESULT waitResult = d3d12Fence->SetEventOnCompletion(allocatorCompletion, allocatorFenceEvent.get());
 		if (FAILED(waitResult))
 			return waitResult;
+		PerfProbe::Scope probeAllocatorWait(PerfProbe::Bucket::DX12AllocatorWait);
 		if (WaitForSingleObject(allocatorFenceEvent.get(), 5000) != WAIT_OBJECT_0) {
 			logger::error("[DX12SwapChain] GPU allocator fence did not complete within five seconds");
 			return DXGI_ERROR_DEVICE_HUNG;
@@ -580,7 +583,10 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	}
 
 	// Present the frame
-	DX::ThrowIfFailed(swapChain->Present(SyncInterval, Flags));
+	{
+		PerfProbe::Scope probeSwapPresent(PerfProbe::Bucket::DX12SwapPresent);
+		DX::ThrowIfFailed(swapChain->Present(SyncInterval, Flags));
+	}
 	if (traceDLSSGPresent)
 		logger::debug("[DX12SwapChain] DLSS-G present stage: swap chain present returned");
 	if (presenter == Presenter::kDLSSG && imageReconstruction.streamlineDX12.featureDLSSG)

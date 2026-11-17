@@ -65,6 +65,8 @@ virtual const void* GetSettingsBlob() const { return nullptr; }
 	// Whether the feature .ini is present on disk. Unlike `loaded` this stays true for
 	// features disabled at boot, so they remain reachable in the UI.
 	bool installed = false;
+	// [PerfProbe] CPU ticks spent in this module's per-frame callbacks since the last report.
+	int64_t perfProbeTicks = 0;
 	std::string version;
 	std::string failedLoadedMessage;
 
@@ -379,8 +381,13 @@ public:
 	template <typename Func>
 	static inline void ForEachLoadedModule(std::string_view methodName, Func&& callback, bool emitGpuZone = false)
 	{
+		const bool perFrame = methodName == "Reset" || methodName == "EarlyPrepass" ||
+		                      methodName == "Prepass" || methodName == "ReflectionsPrepass";
 		for (auto* feature : GetModuleList()) {
 			if (feature->loaded) {
+				LARGE_INTEGER probeBegin{};
+				if (perFrame)
+					QueryPerformanceCounter(&probeBegin);
 #ifdef TRACY_ENABLE
 				{
 					const auto zoneName = std::format("{}::{}", feature->GetShortName(), methodName);
@@ -395,6 +402,11 @@ public:
 #else
 				callback(feature);
 #endif
+				if (perFrame) {
+					LARGE_INTEGER probeEnd{};
+					QueryPerformanceCounter(&probeEnd);
+					feature->perfProbeTicks += probeEnd.QuadPart - probeBegin.QuadPart;
+				}
 			}
 		}
 	}

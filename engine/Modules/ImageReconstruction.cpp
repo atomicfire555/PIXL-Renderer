@@ -9,6 +9,7 @@
 #include "HybridGI.h"
 #include "Hooks.h"
 #include "State.h"
+#include "PerfProbe.h"
 #include "Menu.h"
 #include "ImageReconstruction/DX12SwapChain.h"
 #include "ImageReconstruction/FidelityFX.h"
@@ -1871,6 +1872,7 @@ void ImageReconstruction::TimerSleepQPC(int64_t targetQPC)
 
 void ImageReconstruction::FrameLimiter()
 {
+	PerfProbe::Scope probeLimiter(PerfProbe::Bucket::FrameLimiter);
 	if (d3d12SwapChainActive) {
 		// Use frame latency waitable object if available for better frame pacing
 		HANDLE waitableObject = GetFrameLatencyWaitableObject();
