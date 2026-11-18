@@ -153,6 +153,10 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		logger::warn("[ImageReconstruction] DX12 sidecar unavailable in exclusive fullscreen; switch Skyrim to borderless/windowed for Neural Rendering or Frame Generation");
 	}
 	imageReconstruction.frameGenerationConfiguredAtBoot = frameGenerationRequested;
+	logger::info("[Frame Generation] At launch: {} (backend {}, refresh {:.1f} Hz, force enable {}, windowed {})",
+		frameGenerationRequested ? "requested" : "off in saved settings",
+		imageReconstruction.UsesDLSSGFrameGeneration() ? "DLSS-G" : "FSR 3", refreshRate,
+		imageReconstruction.settings.frameGenerationForceEnable != 0, sidecarAllowed);
 	imageReconstruction.frameGenerationBackendAtBoot = imageReconstruction.settings.frameGenerationBackend;
 	const bool refreshAllowsFrameGeneration = refreshRate >= 120 || imageReconstruction.settings.frameGenerationForceEnable;
 	DX12SwapChain::Presenter requestedPresenter = DX12SwapChain::Presenter::kNone;
@@ -670,6 +674,11 @@ void ImageReconstruction::DrawSettings()
 			settings.frameGenerationMode = fgEnabled ? 1 : 0;
 			if (fgEnabled)
 				settings.frameGenerationForceEnable = 1;
+			// Frame generation is provisioned only when the swap chain is created at
+			// launch. Persist the toggle now (as the hotkey already does) so a restart
+			// actually applies it instead of silently reverting to the saved value.
+			if (globals::state)
+				globals::state->Save();
 		}
 		ImGui::EndDisabled();
 		if (!IsSelectedFrameGenerationBackendSelectable())
