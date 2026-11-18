@@ -533,6 +533,31 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 		}
 	}
 
+	// This present runs inside the IDXGISwapChain::Present hook, after
+	// State::Reset() advanced frameCount. The frame being presented (whose camera
+	// constants, Reflex sleep and simulation-start marker were recorded) is the
+	// previous index; without this, DLSS-G found "stale" constants every frame
+	// and stayed disabled. Restored when Present returns.
+	struct PresentFrameScope
+	{
+		explicit PresentFrameScope(Streamline& a_streamline, bool a_active) :
+			streamline(a_streamline), active(a_active)
+		{
+			if (active && globals::state)
+				streamline.presentFrameOverride = static_cast<uint32_t>(globals::state->frameCount) - 1u;
+		}
+		~PresentFrameScope()
+		{
+			if (active)
+				streamline.presentFrameOverride.reset();
+		}
+		PresentFrameScope(const PresentFrameScope&) = delete;
+		PresentFrameScope& operator=(const PresentFrameScope&) = delete;
+		Streamline& streamline;
+		bool active;
+	} presentFrameScope(imageReconstruction.streamlineDX12,
+		presenter == Presenter::kDLSSG && imageReconstruction.streamlineDX12.featureDLSSG);
+
 	if (presenter == Presenter::kDLSSG && imageReconstruction.streamlineDX12.featureDLSSG) {
 		auto& dlssg = imageReconstruction.streamlineDX12;
 		if (traceDLSSGPresent)

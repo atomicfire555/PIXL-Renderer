@@ -512,16 +512,24 @@ bool Streamline::EnsureFrameToken()
 	if (!initialized || !slGetNewFrameToken || !globals::state)
 		return false;
 
-	if (!frameChecker.IsNewFrame())
+	uint32_t frameIndex = CurrentFrameIndex();
+	if (!frameChecker.IsNewFrame(frameIndex))
 		return frameToken != nullptr;
 
-	if (SL_FAILED(result, slGetNewFrameToken(frameToken, &globals::state->frameCount))) {
+	if (SL_FAILED(result, slGetNewFrameToken(frameToken, &frameIndex))) {
 		logger::error("[Streamline] Could not get frame token: {}", magic_enum::enum_name(result));
 		frameToken = nullptr;
 		return false;
 	}
 
 	return frameToken != nullptr;
+}
+
+uint32_t Streamline::CurrentFrameIndex() const
+{
+	if (presentFrameOverride)
+		return *presentFrameOverride;
+	return globals::state ? static_cast<uint32_t>(globals::state->frameCount) : 0u;
 }
 
 bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, bool resetHistory)
@@ -535,7 +543,7 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, bool resetHi
 	sl::Constants slConstants = {};
 
 	auto camera = globals::pipeline::imageReconstruction.cameraFrame;
-    if (camera.frame != globals::state->frameCount)
+    if (camera.frame != CurrentFrameIndex())
         return false;
     camera.reset = camera.reset || resetHistory;
     PIXL::Reconstruction::CameraReprojection reprojection;

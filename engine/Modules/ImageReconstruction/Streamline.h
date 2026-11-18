@@ -8,6 +8,7 @@
 #include "../../State.h"
 
 #include <array>
+#include <optional>
 #include <cstdint>
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -99,6 +100,12 @@ public:
 	PFun_slPCLSetMarker* slPCLSetMarker{};
 
 	Util::FrameChecker frameChecker;
+	// The D3D12 frame-generation present runs inside the IDXGISwapChain::Present
+	// hook, after State::Reset() has already advanced frameCount to the next
+	// frame. While set, frame-token and camera-constant lookups use this index
+	// (the frame being presented) instead of the live frameCount.
+	std::optional<uint32_t> presentFrameOverride;
+	uint32_t CurrentFrameIndex() const;
 	sl::FrameToken* frameToken = nullptr;
 
 	bool isRTXBelow40series = false;
